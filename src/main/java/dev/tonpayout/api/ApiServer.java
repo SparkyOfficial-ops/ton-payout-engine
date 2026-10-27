@@ -1,0 +1,225 @@
+package dev.tonpayout.api;
+
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.OutputStream;
+import java.math.BigInteger;
+import java.net.InetSocketAddress;
+import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.logging.Logger;
+
+import com.sun.net.httpserver.HttpExchange;
+import com.sun.net.httpserver.HttpServer;
+
+import dev.tonpayout.config.EngineConfig;
+import dev.tonpayout.json.Json;
+import dev.tonpayout.queue.PayoutBatcher;
+import dev.tonpayout.queue.Transfer;
+
+public final class ApiServer {
+    private static final Logger LOG = Logger.getLogger(ApiServer.class.getName());
+    private static final int MAX_BODY = 1_048_576;
+    private static final int MAX_TRANSFERS = 10_000;
+
+    private final EngineConfig config;
+    private final PayoutBatcher batcher;
+    private HttpServer server;
+
+    public ApiServer(EngineConfig config, PayoutBatcher batcher) {
+        this.config = config;
+        this.batcher = batcher;
+    }
+
+    public void start() throws IOException {
+        server = HttpServer.create(new InetSocketAddress(config.httpHost(), config.httpPort()), 0);
+        server.createContext("/health", this::health);
+        server.createContext("/api/v1/payout", this::payout);
+        server.createContext("/api/v1/status", this::status);
+        server.createContext("/api/v1/balance", this::balance);
+        server.start();
+        LOG.info("http " + config.httpHost() + ":" + config.httpPort()
+                + " wallet=" + (config.walletAddress().isBlank() ? "unset" : config.walletAddress())
+                + " network=" + config.tonNetwork());
+    }
+
+    public void stop() {
+        if (server != null) {
+            server.stop(0);
+        }
+    }
+
+    private void health(HttpExchange exchange) throws IOException {
+        if (!"GET".equals(exchange.getRequestMethod())) {
+            send(exchange, 405, error("method not allowed"));
+            return;
+        }
+        Map<String, Object> body = new LinkedHashMap<>();
+        body.put("status", "up");
+        send(exchange, 200, body);
+    }
+
+    private void payout(HttpExchange exchange) throws IOException {
+        if (!authorized(exchange)) {
+            return;
+        }
+        if (!"POST".equals(exchange.getRequestMethod())) {
+            send(exchange, 405, error("method not allowed"));
+            return;
+        }
+        String raw = readBody(exchange);
+        if (raw == null) {
+            send(exchange, 413, error("body is too large"));
+            return;
+        }
+        try {
+            List<Transfer> transfers = parseTransfers(raw);
+            String batchId = batcher.enqueue(transfers);
+            Map<String, Object> body = new LinkedHashMap<>();
+            body.put("batchId", batchId);
+            body.put("status", "queued");
+            body.put("count", transfers.size());
+            send(exchange, 202, body);
+        } catch (IllegalArgumentException e) {
+            send(exchange, 400, error(e.getMessage()));
+        }
+    }
+
+    private void status(HttpExchange exchange) throws IOException {
+        if (!authorized(exchange)) {
+            return;
+        }
+        if (!"GET".equals(exchange.getRequestMethod())) {
+            send(exchange, 405, error("method not allowed"));
+            return;
+        }
+        String path = exchange.getRequestURI().getPath();
+        String prefix = "/api/v1/status/";
+        if (!path.startsWith(prefix) || path.length() == prefix.length()) {
+            send(exchange, 404, error("batch id required"));
+            return;
+        }
+        Map<String, Object> body = batcher.status(path.substring(prefix.length()));
+        if (body == null) {
+            send(exchange, 404, error("batch not found"));
+            return;
+        }
+        send(exchange, 200, body);
+    }
+
+    private void balance(HttpExchange exchange) throws IOException {
+        if (!authorized(exchange)) {
+            return;
+        }
+        if (!"GET".equals(exchange.getRequestMethod())) {
+            send(exchange, 405, error("method not allowed"));
+            return;
+        }
+        Map<String, Object> body = new LinkedHashMap<>();
+        body.put("address", config.walletAddress());
+        body.put("balanceNano", null);
+        body.put("network", config.tonNetwork());
+        body.put("endpoint", config.tonEndpoint());
+        send(exchange, 200, body);
+    }
+
+    private boolean authorized(HttpExchange exchange) throws IOException {
+        if (config.apiKey().isBlank()) {
+            send(exchange, 503, error("PAYOUT_API_KEY is not set"));
+            return false;
+        }
+        String provided = exchange.getRequestHeaders().getFirst("X-Api-Key");
+        if (provided == null || !constantTimeEquals(config.apiKey(), provided.trim())) {
+            send(exchange, 401, error("invalid api key"));
+            return false;
+        }
+        return true;
+    }
+
+    private static List<Transfer> parseTransfers(String raw) {
+        Map<String, Object> root = Json.asObject(Json.parse(raw));
+        Object rawTransfers = root.get("transfers");
+        if (!(rawTransfers instanceof List)) {
+            throw new IllegalArgumentException("transfers array is required");
+        }
+        List<?> list = (List<?>) rawTransfers;
+        if (list.isEmpty()) {
+            throw new IllegalArgumentException("transfers must not be empty");
+        }
+        if (list.size() > MAX_TRANSFERS) {
+            throw new IllegalArgumentException("too many transfers");
+        }
+        List<Transfer> transfers = new ArrayList<>(list.size());
+        for (Object item : list) {
+            Map<String, Object> row = Json.asObject(item);
+            String to = text(row.get("to"));
+            String amount = text(row.get("amountNano"));
+            String comment = row.get("comment") == null ? "" : text(row.get("comment"));
+            if (to.isBlank() || to.length() > 128) {
+                throw new IllegalArgumentException("invalid destination");
+            }
+            if (comment.length() > 120) {
+                throw new IllegalArgumentException("comment is too long");
+            }
+            try {
+                if (new BigInteger(amount).signum() <= 0) {
+                    throw new IllegalArgumentException("amountNano must be positive");
+                }
+            } catch (NumberFormatException e) {
+                throw new IllegalArgumentException("amountNano must be a positive integer string");
+            }
+            transfers.add(new Transfer(to, amount, comment));
+        }
+        return transfers;
+    }
+
+    private static String text(Object value) {
+        if (value == null) {
+            throw new IllegalArgumentException("missing field");
+        }
+        return String.valueOf(value);
+    }
+
+    private static String readBody(HttpExchange exchange) throws IOException {
+        int length = 0;
+        try (InputStream in = exchange.getRequestBody()) {
+            byte[] chunk = in.readNBytes(MAX_BODY + 1);
+            length = chunk.length;
+            if (length > MAX_BODY) {
+                return null;
+            }
+            return new String(chunk, 0, length, StandardCharsets.UTF_8);
+        }
+    }
+
+    private static Map<String, Object> error(String message) {
+        Map<String, Object> body = new LinkedHashMap<>();
+        body.put("error", message);
+        return body;
+    }
+
+    private static void send(HttpExchange exchange, int code, Map<String, Object> body) throws IOException {
+        byte[] bytes = Json.stringify(body).getBytes(StandardCharsets.UTF_8);
+        exchange.getResponseHeaders().set("Content-Type", "application/json; charset=utf-8");
+        exchange.sendResponseHeaders(code, bytes.length);
+        try (OutputStream out = exchange.getResponseBody()) {
+            out.write(bytes);
+        }
+    }
+
+    private static boolean constantTimeEquals(String left, String right) {
+        byte[] a = left.getBytes(StandardCharsets.UTF_8);
+        byte[] b = right.getBytes(StandardCharsets.UTF_8);
+        int diff = a.length ^ b.length;
+        int n = Math.max(a.length, b.length);
+        for (int i = 0; i < n; i++) {
+            byte av = i < a.length ? a[i] : 0;
+            byte bv = i < b.length ? b[i] : 0;
+            diff |= av ^ bv;
+        }
+        return diff == 0;
+    }
+}

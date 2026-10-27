@@ -1,0 +1,9 @@
+target/
+secrets/
+*.key
+.env
+.idea/
+*.iml
+.classpath
+.project
+.settings/
