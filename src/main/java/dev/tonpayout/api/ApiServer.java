@@ -11,6 +11,7 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.logging.Level;
 import java.util.logging.Logger;
 
 import com.sun.net.httpserver.HttpExchange;
@@ -89,6 +90,9 @@ public final class ApiServer {
             send(exchange, 202, body);
         } catch (IllegalArgumentException e) {
             send(exchange, 400, error(e.getMessage()));
+        } catch (Exception e) {
+            LOG.log(Level.SEVERE, "failed to store payout", e);
+            send(exchange, 500, error("failed to store payout"));
         }
     }
 
@@ -106,12 +110,17 @@ public final class ApiServer {
             send(exchange, 404, error("batch id required"));
             return;
         }
-        Map<String, Object> body = batcher.status(path.substring(prefix.length()));
-        if (body == null) {
-            send(exchange, 404, error("batch not found"));
-            return;
+        try {
+            Map<String, Object> body = batcher.status(path.substring(prefix.length()));
+            if (body == null) {
+                send(exchange, 404, error("batch not found"));
+                return;
+            }
+            send(exchange, 200, body);
+        } catch (Exception e) {
+            LOG.log(Level.SEVERE, "failed to read payout status", e);
+            send(exchange, 500, error("failed to read payout status"));
         }
-        send(exchange, 200, body);
     }
 
     private void balance(HttpExchange exchange) throws IOException {

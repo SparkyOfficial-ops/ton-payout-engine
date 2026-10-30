@@ -23,6 +23,11 @@
             <artifactId>ton-sdk-contract</artifactId>
             <version>${cton.version}</version>
         </dependency>
+        <dependency>
+            <groupId>org.xerial</groupId>
+            <artifactId>sqlite-jdbc</artifactId>
+            <version>3.49.1.0</version>
+        </dependency>
     </dependencies>
 
     <build>

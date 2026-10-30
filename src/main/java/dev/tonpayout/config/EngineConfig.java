@@ -20,6 +20,7 @@ public final class EngineConfig {
     private final int batchMaxSize;
     private final String webhookUrl;
     private final int webhookTimeoutMs;
+    private final String dbPath;
 
     private EngineConfig(Properties properties) {
         httpHost = setting(properties, "http.host", "PAYOUT_HTTP_HOST", "0.0.0.0");
@@ -39,6 +40,7 @@ public final class EngineConfig {
         webhookUrl = setting(properties, "webhook.url", "WEBHOOK_URL", "");
         webhookTimeoutMs = parseInt(setting(properties, "webhook.timeoutMs", "WEBHOOK_TIMEOUT_MS", "5000"),
                 "webhook.timeoutMs", 100, 60_000);
+        dbPath = setting(properties, "db.path", "PAYOUT_DB_PATH", "data/payout.db");
     }
 
     public static EngineConfig load() throws IOException {
@@ -98,4 +100,5 @@ public final class EngineConfig {
     public int batchMaxSize() { return batchMaxSize; }
     public String webhookUrl() { return webhookUrl; }
     public int webhookTimeoutMs() { return webhookTimeoutMs; }
+    public String dbPath() { return dbPath; }
 }

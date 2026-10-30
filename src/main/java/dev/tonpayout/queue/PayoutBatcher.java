@@ -1,13 +1,12 @@
 package dev.tonpayout.queue;
 
+import java.sql.SQLException;
 import java.util.ArrayList;
-import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.BlockingQueue;
-import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
 import java.util.logging.Level;
@@ -16,6 +15,8 @@ import java.util.logging.Logger;
 import dev.tonpayout.chain.ChainSender;
 import dev.tonpayout.config.EngineConfig;
 import dev.tonpayout.notify.WebhookNotifier;
+import dev.tonpayout.queue.PayoutStore.BatchOutcome;
+import dev.tonpayout.queue.PayoutStore.QueuedTransfer;
 
 public final class PayoutBatcher {
     private static final Logger LOG = Logger.getLogger(PayoutBatcher.class.getName());
@@ -23,43 +24,41 @@ public final class PayoutBatcher {
     private final EngineConfig config;
     private final ChainSender chain;
     private final WebhookNotifier webhook;
+    private final PayoutStore store;
     private final BlockingQueue<Item> queue = new LinkedBlockingQueue<>();
-    private final ConcurrentHashMap<String, Batch> batches = new ConcurrentHashMap<>();
     private volatile boolean running;
     private Thread worker;
 
-    public PayoutBatcher(EngineConfig config, ChainSender chain, WebhookNotifier webhook) {
+    public PayoutBatcher(EngineConfig config, ChainSender chain, WebhookNotifier webhook, PayoutStore store) {
         this.config = config;
         this.chain = chain;
         this.webhook = webhook;
+        this.store = store;
     }
 
-    public String enqueue(List<Transfer> transfers) {
+    public String enqueue(List<Transfer> transfers) throws SQLException {
         String batchId = UUID.randomUUID().toString();
-        batches.put(batchId, new Batch(batchId, transfers.size()));
-        for (Transfer transfer : transfers) {
-            queue.add(new Item(batchId, transfer));
+        List<QueuedTransfer> stored = store.insertQueued(batchId, transfers);
+        for (QueuedTransfer row : stored) {
+            queue.add(new Item(row.id(), row.batchId(), row.transfer()));
         }
         return batchId;
     }
 
-    public Map<String, Object> status(String batchId) {
-        Batch batch = batches.get(batchId);
-        if (batch == null) {
-            return null;
-        }
-        synchronized (batch) {
-            Map<String, Object> body = new LinkedHashMap<>();
-            body.put("batchId", batch.id);
-            body.put("status", batch.status);
-            body.put("count", batch.total);
-            body.put("txHash", batch.txHash);
-            body.put("error", batch.error);
-            return body;
-        }
+    public Map<String, Object> status(String batchId) throws SQLException {
+        return store.batchStatus(batchId);
     }
 
-    public void start() {
+    public void start() throws SQLException {
+        List<QueuedTransfer> pending = store.loadQueued();
+        for (QueuedTransfer row : pending) {
+            queue.add(new Item(row.id(), row.batchId(), row.transfer()));
+        }
+        int sending = store.countSending();
+        LOG.info("loaded " + pending.size() + " queued transfers from " + config.dbPath());
+        if (sending > 0) {
+            LOG.warning(sending + " transfers are sending from a previous run and will not be broadcast again");
+        }
         running = true;
         worker = new Thread(this::loop, "payout-batcher");
         worker.setDaemon(true);
@@ -70,6 +69,11 @@ public final class PayoutBatcher {
         running = false;
         if (worker != null) {
             worker.interrupt();
+            try {
+                worker.join(2000);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
         }
     }
 
@@ -99,23 +103,17 @@ public final class PayoutBatcher {
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
                 return;
-            } catch (RuntimeException e) {
+            } catch (Exception e) {
                 LOG.log(Level.SEVERE, "batcher loop error", e);
             }
         }
     }
 
-    private void dispatch(List<Item> chunk, List<Item> buffer) {
+    private void dispatch(List<Item> chunk, List<Item> buffer) throws SQLException {
         List<Item> live = new ArrayList<>(chunk.size());
         for (Item item : chunk) {
-            Batch batch = batches.get(item.batchId);
-            if (batch == null) {
+            if (store.isFailed(item.batchId)) {
                 continue;
-            }
-            synchronized (batch) {
-                if ("failed".equals(batch.status)) {
-                    continue;
-                }
             }
             live.add(item);
         }
@@ -123,97 +121,52 @@ public final class PayoutBatcher {
             return;
         }
 
+        List<Long> ids = new ArrayList<>(live.size());
         List<Transfer> transfers = new ArrayList<>(live.size());
+        Map<String, List<Long>> byBatch = new LinkedHashMap<>();
         for (Item item : live) {
+            ids.add(item.id);
             transfers.add(item.transfer);
+            byBatch.computeIfAbsent(item.batchId, key -> new ArrayList<>()).add(item.id);
         }
-        String txHash = null;
-        String status;
-        String error = null;
+
         try {
+            store.markSending(ids);
             if (!chain.isReady()) {
                 throw new IllegalStateException("wallet address or key file is not set");
             }
-            txHash = chain.send(transfers);
-            status = "sent";
+            String txHash = chain.send(transfers);
             LOG.info("bus of " + transfers.size() + " transfers sent, hash " + txHash);
+            for (Map.Entry<String, List<Long>> entry : byBatch.entrySet()) {
+                notify(store.markSent(entry.getKey(), entry.getValue(), txHash));
+            }
         } catch (Exception e) {
-            status = "failed";
-            error = e.getMessage();
             LOG.log(Level.WARNING, "bus of " + transfers.size() + " transfers failed", e);
-        }
-
-        Map<String, Integer> counts = new HashMap<>();
-        for (Item item : live) {
-            counts.merge(item.batchId, 1, Integer::sum);
-        }
-        for (Map.Entry<String, Integer> entry : counts.entrySet()) {
-            finish(entry.getKey(), entry.getValue(), status, txHash, error);
-            if ("failed".equals(status)) {
-                String batchId = entry.getKey();
+            String message = e.getMessage() == null ? e.getClass().getSimpleName() : e.getMessage();
+            for (String batchId : byBatch.keySet()) {
                 buffer.removeIf(item -> batchId.equals(item.batchId));
                 queue.removeIf(item -> batchId.equals(item.batchId));
+                notify(store.markFailed(batchId, message));
             }
         }
     }
 
-    private void finish(String batchId, int done, String status, String txHash, String error) {
-        Batch batch = batches.get(batchId);
-        boolean terminal = false;
-        String notifyStatus = status;
-        String notifyError = error;
-        String notifyTx = txHash;
-        synchronized (batch) {
-            boolean alreadyDone = "sent".equals(batch.status) || "failed".equals(batch.status);
-            if ("failed".equals(status)) {
-                batch.status = "failed";
-                batch.error = error;
-                batch.pending = 0;
-                terminal = !alreadyDone;
-            } else {
-                batch.pending -= done;
-                if (txHash != null && !txHash.isBlank()) {
-                    batch.txHash = batch.txHash == null ? txHash : batch.txHash + "," + txHash;
-                }
-                if (batch.pending > 0) {
-                    batch.status = "sending";
-                } else if (!"failed".equals(batch.status)) {
-                    batch.pending = 0;
-                    batch.status = status;
-                    terminal = true;
-                }
-            }
-            notifyStatus = batch.status;
-            notifyError = batch.error;
-            notifyTx = batch.txHash;
+    private void notify(BatchOutcome outcome) {
+        if (!outcome.terminal()) {
+            return;
         }
-        if (terminal) {
-            webhook.batchUpdated(batchId, notifyStatus, batch.total, notifyTx, notifyError);
-        }
+        webhook.batchUpdated(outcome.batchId(), outcome.status(), outcome.count(), outcome.txHash(), outcome.error());
     }
 
     private static final class Item {
+        private final long id;
         private final String batchId;
         private final Transfer transfer;
 
-        private Item(String batchId, Transfer transfer) {
+        private Item(long id, String batchId, Transfer transfer) {
+            this.id = id;
             this.batchId = batchId;
             this.transfer = transfer;
-        }
-    }
-
-    private static final class Batch {
-        private final String id;
-        private final int total;
-        private int pending;
-        private String status = "queued";
-        private String txHash;
-        private String error;
-
-        private Batch(String id, int total) {
-            this.id = id;
-            this.total = total;
-            this.pending = total;
         }
     }
 }
