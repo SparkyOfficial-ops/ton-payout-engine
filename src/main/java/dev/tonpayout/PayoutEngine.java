@@ -9,6 +9,7 @@ import dev.tonpayout.chain.CtonChainSender;
 import dev.tonpayout.chain.TonCenterBlockInclusion;
 import dev.tonpayout.config.EngineConfig;
 import dev.tonpayout.notify.WebhookNotifier;
+import dev.tonpayout.queue.Housekeeping;
 import dev.tonpayout.queue.PayoutBatcher;
 import dev.tonpayout.queue.PayoutStore;
 import dev.tonpayout.queue.SendingRecovery;
@@ -29,14 +30,17 @@ public final class PayoutEngine {
         TonCenterBlockInclusion inclusion = new TonCenterBlockInclusion(config);
         SendingRecovery recovery = new SendingRecovery(config, store, webhook, inclusion);
         TxPoller poller = new TxPoller(config, store, webhook, inclusion, recovery);
-        ApiServer api = new ApiServer(config, batcher, chain, recovery);
+        Housekeeping housekeeping = new Housekeeping(config, store);
+        ApiServer api = new ApiServer(config, batcher, chain, recovery, store);
         batcher.start();
         poller.start();
+        housekeeping.start();
         api.start();
         Runtime.getRuntime().addShutdownHook(new Thread(() -> {
             api.stop();
             batcher.stop();
             poller.stop();
+            housekeeping.stop();
             try {
                 store.close();
             } catch (Exception e) {

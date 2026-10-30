@@ -27,6 +27,8 @@ public final class EngineConfig {
     private final long pauseRetryMs;
     private final String alertUrl;
     private final long sendingStaleMs;
+    private final long housekeepingRetentionMs;
+    private final long housekeepingIntervalMs;
 
     private EngineConfig(Properties properties) {
         httpHost = setting(properties, "http.host", "PAYOUT_HTTP_HOST", "0.0.0.0");
@@ -58,6 +60,12 @@ public final class EngineConfig {
         alertUrl = setting(properties, "alert.url", "ALERT_URL", "");
         sendingStaleMs = parseLong(setting(properties, "sending.staleMs", "SENDING_STALE_MS", "300000"),
                 "sending.staleMs", 1_000, 86_400_000);
+        housekeepingRetentionMs = parseLong(
+                setting(properties, "housekeeping.retentionMs", "HOUSEKEEPING_RETENTION_MS", "2592000000"),
+                "housekeeping.retentionMs", 1_000, 630_720_000_000L);
+        housekeepingIntervalMs = parseLong(
+                setting(properties, "housekeeping.intervalMs", "HOUSEKEEPING_INTERVAL_MS", "86400000"),
+                "housekeeping.intervalMs", 1_000, 2_592_000_000L);
     }
 
     public static EngineConfig load() throws IOException {
@@ -124,4 +132,6 @@ public final class EngineConfig {
     public long pauseRetryMs() { return pauseRetryMs; }
     public String alertUrl() { return alertUrl; }
     public long sendingStaleMs() { return sendingStaleMs; }
+    public long housekeepingRetentionMs() { return housekeepingRetentionMs; }
+    public long housekeepingIntervalMs() { return housekeepingIntervalMs; }
 }

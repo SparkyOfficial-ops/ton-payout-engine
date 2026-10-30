@@ -14,6 +14,9 @@ import java.util.List;
 import java.util.Map;
 
 public final class PayoutStore implements AutoCloseable {
+    private static final int BUSY_TIMEOUT_MS = 5_000;
+    private static final int PING_TIMEOUT_MS = 500;
+
     private final Connection connection;
 
     public PayoutStore(Path database) throws SQLException {
@@ -27,10 +30,11 @@ public final class PayoutStore implements AutoCloseable {
         }
         connection = DriverManager.getConnection("jdbc:sqlite:" + database.toAbsolutePath());
         try (Statement statement = connection.createStatement()) {
+            statement.execute("PRAGMA auto_vacuum=INCREMENTAL");
             statement.execute("PRAGMA journal_mode=WAL");
             statement.execute("PRAGMA synchronous=FULL");
             statement.execute("PRAGMA foreign_keys=ON");
-            statement.execute("PRAGMA busy_timeout=5000");
+            statement.execute("PRAGMA busy_timeout=" + BUSY_TIMEOUT_MS);
             statement.execute("""
                     CREATE TABLE IF NOT EXISTS batches (
                         id TEXT PRIMARY KEY,
@@ -61,11 +65,16 @@ public final class PayoutStore implements AutoCloseable {
         try (Statement statement = connection.createStatement()) {
             statement.execute(
                     "CREATE UNIQUE INDEX IF NOT EXISTS idx_batches_idempotency ON batches(idempotency_key)");
+            statement.execute("CREATE INDEX IF NOT EXISTS idx_batches_updated ON batches(updated_at)");
         }
+        attachArchive(database);
     }
 
     public synchronized List<QueuedTransfer> insertQueued(String batchId, String idempotencyKey,
             String requestHash, List<Transfer> transfers) throws SQLException {
+        if (idempotencyKey != null && !idempotencyKey.isBlank() && archivedKey(idempotencyKey)) {
+            throw new DuplicateIdempotencyKey();
+        }
         long now = System.currentTimeMillis();
         connection.setAutoCommit(false);
         try {
@@ -112,20 +121,8 @@ public final class PayoutStore implements AutoCloseable {
     }
 
     public synchronized IdempotentHit findIdempotent(String idempotencyKey) throws SQLException {
-        String batchId;
-        String requestHash;
-        try (PreparedStatement statement = connection.prepareStatement(
-                "SELECT id, request_hash FROM batches WHERE idempotency_key = ?")) {
-            statement.setString(1, idempotencyKey);
-            try (ResultSet result = statement.executeQuery()) {
-                if (!result.next()) {
-                    return null;
-                }
-                batchId = result.getString(1);
-                requestHash = result.getString(2);
-            }
-        }
-        return new IdempotentHit(batchStatus(batchId), requestHash);
+        IdempotentHit live = readIdempotent("batches", idempotencyKey);
+        return live != null ? live : readIdempotent("archive.batches", idempotencyKey);
     }
 
     private static boolean isIdempotencyConstraint(SQLException error) {
@@ -162,22 +159,8 @@ public final class PayoutStore implements AutoCloseable {
     }
 
     public synchronized Map<String, Object> batchStatus(String batchId) throws SQLException {
-        try (PreparedStatement statement = connection.prepareStatement(
-                "SELECT status, total, tx_hash, error FROM batches WHERE id = ?")) {
-            statement.setString(1, batchId);
-            try (ResultSet result = statement.executeQuery()) {
-                if (!result.next()) {
-                    return null;
-                }
-                Map<String, Object> body = new LinkedHashMap<>();
-                body.put("batchId", batchId);
-                body.put("status", result.getString(1));
-                body.put("count", result.getInt(2));
-                body.put("txHash", result.getString(3));
-                body.put("error", result.getString(4));
-                return body;
-            }
-        }
+        Map<String, Object> live = readBatch("batches", batchId);
+        return live != null ? live : readBatch("archive.batches", batchId);
     }
 
     public synchronized boolean isFailed(String batchId) throws SQLException {
@@ -494,6 +477,117 @@ public final class PayoutStore implements AutoCloseable {
         connection.close();
     }
 
+    public synchronized void ping() throws SQLException {
+        SQLException failure = null;
+        try (Statement statement = connection.createStatement()) {
+            statement.execute("PRAGMA busy_timeout=" + PING_TIMEOUT_MS);
+            try (ResultSet result = statement.executeQuery("SELECT 1")) {
+                if (!result.next() || result.getInt(1) != 1) {
+                    failure = new SQLException("database ping failed");
+                }
+            }
+        } catch (SQLException e) {
+            failure = e;
+        }
+        try (Statement statement = connection.createStatement()) {
+            statement.execute("PRAGMA busy_timeout=" + BUSY_TIMEOUT_MS);
+        } catch (SQLException e) {
+            if (failure == null) {
+                failure = e;
+            }
+        }
+        if (failure != null) {
+            throw failure;
+        }
+    }
+
+    public synchronized int archiveTerminal(long updatedBefore, int limit) throws SQLException {
+        if (limit < 1 || limit > 500) {
+            throw new IllegalArgumentException("archive limit out of range");
+        }
+        List<String> ids = new ArrayList<>();
+        try (PreparedStatement statement = connection.prepareStatement(
+                "SELECT id FROM batches WHERE status IN ('confirmed', 'failed') AND updated_at <= ? "
+                        + "ORDER BY updated_at LIMIT ?")) {
+            statement.setLong(1, updatedBefore);
+            statement.setInt(2, limit);
+            try (ResultSet result = statement.executeQuery()) {
+                while (result.next()) {
+                    ids.add(result.getString(1));
+                }
+            }
+        }
+        if (ids.isEmpty()) {
+            return 0;
+        }
+        long now = System.currentTimeMillis();
+        String in = placeholders(ids.size());
+        connection.setAutoCommit(false);
+        try {
+            try (PreparedStatement batches = connection.prepareStatement(
+                    "INSERT INTO archive.batches(id, status, total, tx_hash, error, created_at, updated_at, "
+                            + "confirm_checks, idempotency_key, request_hash, archived_at) "
+                            + "SELECT id, status, total, tx_hash, error, created_at, updated_at, confirm_checks, "
+                            + "idempotency_key, request_hash, ? FROM batches "
+                            + "WHERE updated_at <= ? AND status IN ('confirmed', 'failed') AND id IN (" + in + ")")) {
+                batches.setLong(1, now);
+                batches.setLong(2, updatedBefore);
+                bindStrings(batches, 3, ids);
+                batches.executeUpdate();
+            }
+            try (PreparedStatement transfers = connection.prepareStatement(
+                    "INSERT INTO archive.transfers(id, batch_id, destination, amount_nano, comment, status, archived_at) "
+                            + "SELECT t.id, t.batch_id, t.destination, t.amount_nano, t.comment, t.status, ? "
+                            + "FROM transfers t WHERE t.batch_id IN ("
+                            + "SELECT id FROM archive.batches WHERE archived_at = ? AND id IN (" + in + "))")) {
+                transfers.setLong(1, now);
+                transfers.setLong(2, now);
+                bindStrings(transfers, 3, ids);
+                transfers.executeUpdate();
+            }
+            try (PreparedStatement deleteTransfers = connection.prepareStatement(
+                    "DELETE FROM transfers WHERE batch_id IN ("
+                            + "SELECT id FROM archive.batches WHERE archived_at = ? AND id IN (" + in + "))")) {
+                deleteTransfers.setLong(1, now);
+                bindStrings(deleteTransfers, 2, ids);
+                deleteTransfers.executeUpdate();
+            }
+            int deleted;
+            try (PreparedStatement deleteBatches = connection.prepareStatement(
+                    "DELETE FROM batches WHERE updated_at <= ? AND status IN ('confirmed', 'failed') AND id IN ("
+                            + "SELECT id FROM archive.batches WHERE archived_at = ? AND id IN (" + in + "))")) {
+                deleteBatches.setLong(1, updatedBefore);
+                deleteBatches.setLong(2, now);
+                bindStrings(deleteBatches, 3, ids);
+                deleted = deleteBatches.executeUpdate();
+            }
+            connection.commit();
+            return deleted;
+        } catch (SQLException e) {
+            connection.rollback();
+            throw e;
+        } finally {
+            connection.setAutoCommit(true);
+        }
+    }
+
+    public synchronized void reclaim() throws SQLException {
+        try (Statement statement = connection.createStatement()) {
+            statement.execute("PRAGMA incremental_vacuum(128)");
+        }
+    }
+
+    public static Path archivePath(Path database) {
+        Path absolute = database.toAbsolutePath();
+        String name = absolute.getFileName().toString();
+        int dot = name.lastIndexOf('.');
+        String archiveName = dot > 0
+                ? name.substring(0, dot) + "-archive" + name.substring(dot)
+                : name + "-archive";
+        Path parent = absolute.getParent();
+        return parent == null ? Path.of(archiveName) : parent.resolve(archiveName);
+    }
+
     private BatchOutcome outcome(String batchId, boolean terminal) throws SQLException {
         try (PreparedStatement statement = connection.prepareStatement(
                 "SELECT status, total, tx_hash, error FROM batches WHERE id = ?")) {
@@ -569,6 +663,100 @@ public final class PayoutStore implements AutoCloseable {
     private static void bindIds(PreparedStatement statement, int firstIndex, List<Long> transferIds) throws SQLException {
         for (int i = 0; i < transferIds.size(); i++) {
             statement.setLong(firstIndex + i, transferIds.get(i));
+        }
+    }
+
+    private static void bindStrings(PreparedStatement statement, int firstIndex, List<String> values) throws SQLException {
+        for (int i = 0; i < values.size(); i++) {
+            statement.setString(firstIndex + i, values.get(i));
+        }
+    }
+
+    private void attachArchive(Path database) throws SQLException {
+        String sqlPath = archivePath(database).toString().replace("'", "''");
+        try (Statement statement = connection.createStatement()) {
+            statement.execute("ATTACH DATABASE '" + sqlPath + "' AS archive");
+            statement.execute("PRAGMA archive.journal_mode=WAL");
+            statement.execute("PRAGMA archive.synchronous=FULL");
+            statement.execute("""
+                    CREATE TABLE IF NOT EXISTS archive.batches (
+                        id TEXT PRIMARY KEY,
+                        status TEXT NOT NULL,
+                        total INTEGER NOT NULL,
+                        tx_hash TEXT,
+                        error TEXT,
+                        created_at INTEGER NOT NULL,
+                        updated_at INTEGER NOT NULL,
+                        confirm_checks INTEGER NOT NULL,
+                        idempotency_key TEXT,
+                        request_hash TEXT,
+                        archived_at INTEGER NOT NULL
+                    )
+                    """);
+            statement.execute(
+                    "CREATE UNIQUE INDEX IF NOT EXISTS archive.idx_archive_idempotency ON batches(idempotency_key)");
+            statement.execute("""
+                    CREATE TABLE IF NOT EXISTS archive.transfers (
+                        id INTEGER PRIMARY KEY,
+                        batch_id TEXT NOT NULL,
+                        destination TEXT NOT NULL,
+                        amount_nano TEXT NOT NULL,
+                        comment TEXT,
+                        status TEXT NOT NULL,
+                        archived_at INTEGER NOT NULL
+                    )
+                    """);
+            statement.execute(
+                    "CREATE INDEX IF NOT EXISTS archive.idx_archive_transfers_batch ON transfers(batch_id)");
+        }
+    }
+
+    private boolean archivedKey(String idempotencyKey) throws SQLException {
+        try (PreparedStatement statement = connection.prepareStatement(
+                "SELECT 1 FROM archive.batches WHERE idempotency_key = ?")) {
+            statement.setString(1, idempotencyKey);
+            try (ResultSet result = statement.executeQuery()) {
+                return result.next();
+            }
+        }
+    }
+
+    private IdempotentHit readIdempotent(String table, String idempotencyKey) throws SQLException {
+        try (PreparedStatement statement = connection.prepareStatement(
+                "SELECT id, request_hash, status, total, tx_hash, error FROM " + table
+                        + " WHERE idempotency_key = ?")) {
+            statement.setString(1, idempotencyKey);
+            try (ResultSet result = statement.executeQuery()) {
+                if (!result.next()) {
+                    return null;
+                }
+                Map<String, Object> body = new LinkedHashMap<>();
+                body.put("batchId", result.getString(1));
+                body.put("status", result.getString(3));
+                body.put("count", result.getInt(4));
+                body.put("txHash", result.getString(5));
+                body.put("error", result.getString(6));
+                return new IdempotentHit(body, result.getString(2));
+            }
+        }
+    }
+
+    private Map<String, Object> readBatch(String table, String batchId) throws SQLException {
+        try (PreparedStatement statement = connection.prepareStatement(
+                "SELECT status, total, tx_hash, error FROM " + table + " WHERE id = ?")) {
+            statement.setString(1, batchId);
+            try (ResultSet result = statement.executeQuery()) {
+                if (!result.next()) {
+                    return null;
+                }
+                Map<String, Object> body = new LinkedHashMap<>();
+                body.put("batchId", batchId);
+                body.put("status", result.getString(1));
+                body.put("count", result.getInt(2));
+                body.put("txHash", result.getString(3));
+                body.put("error", result.getString(4));
+                return body;
+            }
         }
     }
 

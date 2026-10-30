@@ -21,6 +21,7 @@ import dev.tonpayout.chain.ChainSender;
 import dev.tonpayout.config.EngineConfig;
 import dev.tonpayout.json.Json;
 import dev.tonpayout.queue.PayoutBatcher;
+import dev.tonpayout.queue.PayoutStore;
 import dev.tonpayout.queue.PayoutStore.BatchOutcome;
 import dev.tonpayout.queue.SendingRecovery;
 import dev.tonpayout.queue.Transfer;
@@ -34,13 +35,16 @@ public final class ApiServer {
     private final PayoutBatcher batcher;
     private final ChainSender chain;
     private final SendingRecovery recovery;
+    private final PayoutStore store;
     private HttpServer server;
 
-    public ApiServer(EngineConfig config, PayoutBatcher batcher, ChainSender chain, SendingRecovery recovery) {
+    public ApiServer(EngineConfig config, PayoutBatcher batcher, ChainSender chain, SendingRecovery recovery,
+            PayoutStore store) {
         this.config = config;
         this.batcher = batcher;
         this.chain = chain;
         this.recovery = recovery;
+        this.store = store;
     }
 
     public void start() throws IOException {
@@ -67,9 +71,19 @@ public final class ApiServer {
             send(exchange, 405, error("method not allowed"));
             return;
         }
+        boolean database = true;
+        try {
+            store.ping();
+        } catch (Exception e) {
+            database = false;
+            LOG.log(Level.WARNING, "health check failed: database is not reachable", e);
+        }
+        boolean wallet = chain.isReady();
         Map<String, Object> body = new LinkedHashMap<>();
-        body.put("status", "up");
-        send(exchange, 200, body);
+        body.put("status", database && wallet ? "up" : "down");
+        body.put("database", database ? "up" : "down");
+        body.put("wallet", wallet ? "ready" : "missing");
+        send(exchange, database && wallet ? 200 : 503, body);
     }
 
     private void payout(HttpExchange exchange) throws IOException {
