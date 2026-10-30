@@ -32,7 +32,6 @@ import dev.tonpayout.queue.Transfer;
 public final class ApiServer {
     private static final Logger LOG = Logger.getLogger(ApiServer.class.getName());
     private static final int MAX_BODY = 1_048_576;
-    private static final int MAX_TRANSFERS = 10_000;
 
     private final EngineConfig config;
     private final PayoutBatcher batcher;
@@ -225,7 +224,7 @@ public final class ApiServer {
         return true;
     }
 
-    private static List<Transfer> parseTransfers(String raw) {
+    private List<Transfer> parseTransfers(String raw) {
         Map<String, Object> root = Json.asObject(Json.parse(raw));
         Object rawTransfers = root.get("transfers");
         if (!(rawTransfers instanceof List)) {
@@ -235,8 +234,9 @@ public final class ApiServer {
         if (list.isEmpty()) {
             throw new IllegalArgumentException("transfers must not be empty");
         }
-        if (list.size() > MAX_TRANSFERS) {
-            throw new IllegalArgumentException("too many transfers");
+        if (list.size() > config.batchMaxSize()) {
+            throw new IllegalArgumentException(
+                    "transfers count exceeds maximum highload batch size (" + config.batchMaxSize() + ")");
         }
         List<Transfer> transfers = new ArrayList<>(list.size());
         for (Object item : list) {
@@ -244,7 +244,7 @@ public final class ApiServer {
             String to = row.get("to") != null ? text(row.get("to")) : text(row.get("address"));
             String amount = nanoAmount(row);
             String comment = row.get("comment") == null ? "" : text(row.get("comment"));
-            String destination = TonAddress.canonical(to);
+            String destination = TonAddress.canonical(to, config.tonNetwork());
             if (destination == null) {
                 throw new IllegalArgumentException("invalid destination");
             }

@@ -36,6 +36,10 @@ public final class PayoutBatcher {
     private final BlockingQueue<Item> queue = new LinkedBlockingQueue<>();
     private volatile boolean running;
     private Thread worker;
+    /** Signed message kept for a network retry. A new signature would be a second payment. */
+    private Outgoing pendingOutgoing;
+    private List<Long> pendingIds;
+    private long retryNotBefore;
 
     public PayoutBatcher(EngineConfig config, ChainSender chain, WebhookNotifier webhook, PayoutStore store) {
         this.config = config;
@@ -151,16 +155,16 @@ public final class PayoutBatcher {
                     buffer.add(item);
                 }
                 boolean windowElapsed = !buffer.isEmpty() && System.currentTimeMillis() >= flushAt;
-                if (buffer.size() >= config.batchMaxSize() || windowElapsed) {
-                    int size = Math.min(config.batchMaxSize(), buffer.size());
-                    List<Item> chunk = new ArrayList<>(buffer.subList(0, size));
-                    buffer.subList(0, size).clear();
+                if (shouldFlush(buffer, windowElapsed)) {
+                    List<Item> chunk = takeWholeBatches(buffer);
                     if (!buffer.isEmpty()) {
                         flushAt = System.currentTimeMillis() + config.batchWindowMs();
                     }
-                    long pauseMs = dispatch(chunk, buffer);
-                    if (pauseMs > 0) {
-                        flushAt = System.currentTimeMillis() + pauseMs;
+                    if (!chunk.isEmpty()) {
+                        long pauseMs = dispatch(chunk, buffer);
+                        if (pauseMs > 0) {
+                            flushAt = System.currentTimeMillis() + pauseMs;
+                        }
                     }
                 }
             } catch (InterruptedException e) {
@@ -170,6 +174,96 @@ public final class PayoutBatcher {
                 LOG.log(Level.SEVERE, "batcher loop error", e);
             }
         }
+    }
+
+    /**
+     * One payout request stays in one external message. A later request is not sliced
+     * to fill the remaining room: that would let one half land on-chain and the other
+     * be marked failed.
+     */
+    private boolean shouldFlush(List<Item> buffer, boolean windowElapsed) throws SQLException {
+        if (buffer.isEmpty()) {
+            return false;
+        }
+        if (pendingOutgoing != null && startsWith(buffer, pendingIds)) {
+            return windowElapsed && System.currentTimeMillis() >= retryNotBefore;
+        }
+        if (windowElapsed) {
+            return true;
+        }
+        int packed = 0;
+        int index = 0;
+        while (index < buffer.size()) {
+            String batchId = buffer.get(index).batchId;
+            int count = batchRun(buffer, index);
+            int total = batchTotal(batchId);
+            if (count < total || count > config.batchMaxSize()) {
+                return count > config.batchMaxSize() && count == total;
+            }
+            if (packed > 0 && packed + count > config.batchMaxSize()) {
+                return true;
+            }
+            packed += count;
+            index += count;
+            if (packed >= config.batchMaxSize()) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private List<Item> takeWholeBatches(List<Item> buffer) throws SQLException {
+        if (pendingOutgoing != null && startsWith(buffer, pendingIds)) {
+            List<Item> chunk = new ArrayList<>(buffer.subList(0, pendingIds.size()));
+            buffer.subList(0, pendingIds.size()).clear();
+            return chunk;
+        }
+        List<Item> chunk = new ArrayList<>();
+        while (!buffer.isEmpty()) {
+            String batchId = buffer.get(0).batchId;
+            int count = batchRun(buffer, 0);
+            int total = batchTotal(batchId);
+            if (count < total) {
+                break;
+            }
+            List<Item> batch = new ArrayList<>(buffer.subList(0, count));
+            if (count > config.batchMaxSize()) {
+                buffer.subList(0, count).clear();
+                Map<String, List<Long>> rejected = new LinkedHashMap<>();
+                List<Long> ids = new ArrayList<>(batch.size());
+                for (Item item : batch) {
+                    ids.add(item.id);
+                }
+                rejected.put(batchId, ids);
+                fail(rejected, buffer, "transfers count exceeds maximum highload batch size ("
+                        + config.batchMaxSize() + ")");
+                continue;
+            }
+            if (!chunk.isEmpty() && chunk.size() + count > config.batchMaxSize()) {
+                break;
+            }
+            chunk.addAll(batch);
+            buffer.subList(0, count).clear();
+            if (chunk.size() >= config.batchMaxSize()) {
+                break;
+            }
+        }
+        return chunk;
+    }
+
+    private static int batchRun(List<Item> buffer, int index) {
+        String batchId = buffer.get(index).batchId;
+        int end = index + 1;
+        while (end < buffer.size() && batchId.equals(buffer.get(end).batchId)) {
+            end++;
+        }
+        return end - index;
+    }
+
+    private int batchTotal(String batchId) throws SQLException {
+        Map<String, Object> status = store.batchStatus(batchId);
+        Object raw = status == null ? null : status.get("count");
+        return raw instanceof Number number ? number.intValue() : 0;
     }
 
     private long dispatch(List<Item> chunk, List<Item> buffer) throws SQLException {
@@ -220,41 +314,41 @@ public final class PayoutBatcher {
 
         try {
             store.markSending(ids);
-            Outgoing outgoing;
-            try {
-                outgoing = chain.prepare(transfers);
-            } catch (Exception e) {
-                LOG.log(Level.WARNING, "bus of " + transfers.size() + " transfers was not signed", e);
-                String message = e.getMessage() == null ? e.getClass().getSimpleName() : e.getMessage();
-                fail(byBatch, buffer, message);
+            Outgoing outgoing = matchingPending(live);
+            if (pendingOutgoing != null && outgoing == null) {
+                LOG.warning("signed boc does not match the transfers still waiting; not signing a second message");
+                clearPending();
                 return 0;
             }
-            store.rememberHash(byBatch.keySet(), outgoing.hash());
-            Exception lastError = null;
-            for (int attempt = 1; attempt <= 3; attempt++) {
+            if (outgoing == null) {
                 try {
-                    chain.broadcast(outgoing);
-                    lastError = null;
-                    break;
+                    outgoing = chain.prepare(transfers);
                 } catch (Exception e) {
-                    lastError = e;
-                    if (attempt == 3) {
-                        break;
-                    }
-                    try {
-                        Thread.sleep(1000L * attempt);
-                    } catch (InterruptedException interrupted) {
-                        Thread.currentThread().interrupt();
-                        lastError = interrupted;
-                        break;
-                    }
+                    LOG.log(Level.WARNING, "bus of " + transfers.size() + " transfers was not signed", e);
+                    String message = e.getMessage() == null ? e.getClass().getSimpleName() : e.getMessage();
+                    fail(byBatch, buffer, message);
+                    return 0;
                 }
+                store.rememberHash(byBatch.keySet(), outgoing.hash());
+                pendingOutgoing = outgoing;
+                pendingIds = List.copyOf(ids);
             }
+            Exception lastError = broadcastAttempts(outgoing);
             if (lastError != null) {
+                if (retryableBroadcast(lastError)) {
+                    LOG.log(Level.WARNING, "broadcast of " + transfers.size()
+                            + " transfers failed after 3 attempts, hash " + outgoing.hash()
+                            + " will be sent again", lastError);
+                    retryNotBefore = System.currentTimeMillis() + config.pauseRetryMs();
+                    buffer.addAll(0, live);
+                    return config.pauseRetryMs();
+                }
                 LOG.log(Level.WARNING, "broadcast of " + transfers.size()
                         + " transfers failed after 3 attempts, hash " + outgoing.hash() + " was stored", lastError);
+                clearPending();
                 return 0;
             }
+            clearPending();
             LOG.info("bus of " + transfers.size() + " transfers sent, hash " + outgoing.hash());
             try {
                 for (Map.Entry<String, List<Long>> entry : byBatch.entrySet()) {
@@ -270,6 +364,99 @@ public final class PayoutBatcher {
             fail(byBatch, buffer, message);
         }
         return 0;
+    }
+
+    private Outgoing matchingPending(List<Item> live) {
+        if (pendingOutgoing == null || pendingIds == null || live.size() != pendingIds.size()) {
+            return null;
+        }
+        for (int i = 0; i < live.size(); i++) {
+            if (live.get(i).id != pendingIds.get(i)) {
+                return null;
+            }
+        }
+        return pendingOutgoing;
+    }
+
+    private boolean startsWith(List<Item> buffer, List<Long> ids) {
+        if (ids == null || buffer.size() < ids.size()) {
+            return false;
+        }
+        for (int i = 0; i < ids.size(); i++) {
+            if (buffer.get(i).id != ids.get(i)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private void clearPending() {
+        pendingOutgoing = null;
+        pendingIds = null;
+        retryNotBefore = 0;
+    }
+
+    private Exception broadcastAttempts(Outgoing outgoing) {
+        Exception lastError = null;
+        for (int attempt = 1; attempt <= 3; attempt++) {
+            try {
+                chain.broadcast(outgoing);
+                return null;
+            } catch (Exception e) {
+                lastError = e;
+                if (attempt == 3) {
+                    break;
+                }
+                try {
+                    Thread.sleep(1000L * attempt);
+                } catch (InterruptedException interrupted) {
+                    Thread.currentThread().interrupt();
+                    return interrupted;
+                }
+            }
+        }
+        return lastError;
+    }
+
+    /** Connection loss, rate limit, and a temporary node error. The same signed bytes can be sent again. */
+    private static boolean retryableBroadcast(Throwable error) {
+        Throwable current = error;
+        while (current != null) {
+            if (current instanceof InterruptedException) {
+                return false;
+            }
+            if (current instanceof java.net.ConnectException
+                    || current instanceof java.net.SocketTimeoutException
+                    || current instanceof java.net.UnknownHostException
+                    || current instanceof java.net.NoRouteToHostException) {
+                return true;
+            }
+            String message = current.getMessage();
+            if (message != null) {
+                String lower = message.toLowerCase();
+                if (lower.contains("connection refused")
+                        || lower.contains("connection reset")
+                        || lower.contains("failed to connect")
+                        || lower.contains("timed out")
+                        || lower.contains("timeout")
+                        || lower.contains("429")
+                        || lower.contains("rate limit")
+                        || lower.contains("too many requests")
+                        || lower.contains("code=500")
+                        || lower.contains("http 500")
+                        || lower.contains("liteserver")
+                        || lower.contains("code=502")
+                        || lower.contains("code=503")
+                        || lower.contains("code=504")
+                        || lower.contains("http 502")
+                        || lower.contains("http 503")
+                        || lower.contains("http 504")) {
+                    return true;
+                }
+            }
+            current = current.getCause();
+        }
+        return false;
     }
 
     private long hold(List<Item> live, List<Item> buffer, Map<String, List<Long>> byBatch,
@@ -293,7 +480,7 @@ public final class PayoutBatcher {
         Map<String, List<Long>> poisoned = new LinkedHashMap<>();
         List<Item> clean = new ArrayList<>(live.size());
         for (Item item : live) {
-            if (TonAddress.isValid(item.transfer.to())) {
+            if (TonAddress.isValid(item.transfer.to(), config.tonNetwork())) {
                 clean.add(item);
             } else {
                 poisoned.computeIfAbsent(item.batchId, key -> new ArrayList<>()).add(item.id);

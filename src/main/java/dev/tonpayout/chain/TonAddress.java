@@ -11,13 +11,25 @@ public final class TonAddress {
     }
 
     public static boolean isValid(String address) {
-        return canonical(address) != null;
+        return isValid(address, "mainnet");
+    }
+
+    public static boolean isValid(String address, String network) {
+        return canonical(address, network) != null;
     }
 
     /**
-     * @return a form {@code Address} will accept, or null when the text is not a TON address
+     * @return a form {@code Address} will accept on mainnet, or null when the text is not a TON address
      */
     public static String canonical(String address) {
+        return canonical(address, "mainnet");
+    }
+
+    /**
+     * Friendly addresses with the testnet bit ({@code kQ} / {@code 0Q}) are rejected
+     * unless {@code network} is {@code testnet}. Raw addresses have no network bit.
+     */
+    public static String canonical(String address, String network) {
         if (address == null) {
             return null;
         }
@@ -29,7 +41,7 @@ public final class TonAddress {
         if (colon >= 0) {
             return canonicalRaw(value, colon);
         }
-        return canonicalFriendly(value);
+        return canonicalFriendly(value, network);
     }
 
     private static String canonicalRaw(String value, int colon) {
@@ -52,7 +64,7 @@ public final class TonAddress {
         return workchain + ":" + hash.toLowerCase();
     }
 
-    private static String canonicalFriendly(String value) {
+    private static String canonicalFriendly(String value, String network) {
         if (value.length() < 48) {
             return null;
         }
@@ -73,6 +85,10 @@ public final class TonAddress {
         }
         int tag = decoded[0] & 0xFF;
         if ((tag & 0x1F) != 0x11 || (tag & 0x20) != 0) {
+            return null;
+        }
+        boolean testnetAddress = (tag & 0x80) != 0;
+        if (testnetAddress && (network == null || !network.equalsIgnoreCase("testnet"))) {
             return null;
         }
         return Base64.getUrlEncoder().withoutPadding().encodeToString(decoded);
