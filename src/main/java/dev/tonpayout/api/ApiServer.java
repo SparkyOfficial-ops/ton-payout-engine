@@ -257,7 +257,7 @@ public final class ApiServer {
         return transfers;
     }
 
-    private static String nanoAmount(Map<String, Object> row) {
+    static String nanoAmount(Map<String, Object> row) {
         if (row.get("amountNano") != null) {
             String amount = text(row.get("amountNano")).trim();
             try {

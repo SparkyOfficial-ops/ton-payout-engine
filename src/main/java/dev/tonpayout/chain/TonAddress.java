@@ -19,13 +19,14 @@ public final class TonAddress {
     }
 
     /**
-     * @return a form {@code Address} will accept on mainnet, or null when the text is not a TON address
+     * @return raw {@code workchain:64hex} on mainnet, or null when the text is not a TON address
      */
     public static String canonical(String address) {
         return canonical(address, "mainnet");
     }
 
     /**
+     * Bounceable and non-bounceable forms of one account become the same raw address.
      * Friendly addresses with the testnet bit ({@code kQ} / {@code 0Q}) are rejected
      * unless {@code network} is {@code testnet}. Raw addresses have no network bit.
      */
@@ -91,7 +92,14 @@ public final class TonAddress {
         if (testnetAddress && (network == null || !network.equalsIgnoreCase("testnet"))) {
             return null;
         }
-        return Base64.getUrlEncoder().withoutPadding().encodeToString(decoded);
+        int workchain = decoded[1];
+        StringBuilder hash = new StringBuilder(64);
+        for (int i = 2; i < 34; i++) {
+            int piece = decoded[i] & 0xFF;
+            hash.append(Character.forDigit(piece >>> 4, 16));
+            hash.append(Character.forDigit(piece & 0xF, 16));
+        }
+        return workchain + ":" + hash;
     }
 
     private static boolean isHex(String value) {

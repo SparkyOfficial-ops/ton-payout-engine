@@ -33,45 +33,60 @@ public final class EngineConfig {
     private final long housekeepingIntervalMs;
 
     private EngineConfig(Properties properties) {
-        httpHost = setting(properties, "http.host", "PAYOUT_HTTP_HOST", "0.0.0.0");
-        httpPort = parseInt(setting(properties, "http.port", "PAYOUT_HTTP_PORT", "8080"), "http.port", 1, 65535);
-        apiKey = setting(properties, "auth.apiKey", "PAYOUT_API_KEY", "");
-        walletAddress = setting(properties, "wallet.address", "WALLET_ADDRESS", "");
-        walletKeyPath = setting(properties, "wallet.keyPath", "WALLET_KEY_PATH", "secrets/wallet.key");
-        subwalletId = parseInt(setting(properties, "wallet.subwalletId", "WALLET_SUBWALLET_ID", "698983191"),
+        this(properties, true);
+    }
+
+    /** Values come only from {@code properties}. Environment variables are not consulted. */
+    public static EngineConfig from(Properties properties) {
+        return new EngineConfig(properties, false);
+    }
+
+    private EngineConfig(Properties properties, boolean environment) {
+        httpHost = setting(properties, environment, "http.host", "PAYOUT_HTTP_HOST", "0.0.0.0");
+        httpPort = parseInt(setting(properties, environment, "http.port", "PAYOUT_HTTP_PORT", "8080"),
+                "http.port", 1, 65535);
+        apiKey = setting(properties, environment, "auth.apiKey", "PAYOUT_API_KEY", "");
+        walletAddress = setting(properties, environment, "wallet.address", "WALLET_ADDRESS", "");
+        walletKeyPath = setting(properties, environment, "wallet.keyPath", "WALLET_KEY_PATH", "secrets/wallet.key");
+        subwalletId = parseInt(
+                setting(properties, environment, "wallet.subwalletId", "WALLET_SUBWALLET_ID", "698983191"),
                 "wallet.subwalletId", 0, Integer.MAX_VALUE);
-        tonEndpoint = setting(properties, "ton.endpoint", "TON_ENDPOINT", "https://toncenter.com/api/v2");
-        tonApiKey = setting(properties, "ton.apiKey", "TON_API_KEY", "");
-        tonNetwork = setting(properties, "ton.network", "TON_NETWORK", "mainnet");
-        batchWindowMs = parseLong(setting(properties, "batch.windowMs", "BATCH_WINDOW_MS", "2500"),
+        tonEndpoint = setting(properties, environment, "ton.endpoint", "TON_ENDPOINT", "https://toncenter.com/api/v2");
+        tonApiKey = setting(properties, environment, "ton.apiKey", "TON_API_KEY", "");
+        tonNetwork = setting(properties, environment, "ton.network", "TON_NETWORK", "mainnet");
+        batchWindowMs = parseLong(setting(properties, environment, "batch.windowMs", "BATCH_WINDOW_MS", "2500"),
                 "batch.windowMs", 100, 60_000);
-        batchMaxSize = parseInt(setting(properties, "batch.maxSize", "BATCH_MAX_SIZE", "254"),
+        batchMaxSize = parseInt(setting(properties, environment, "batch.maxSize", "BATCH_MAX_SIZE", "254"),
                 "batch.maxSize", 1, 254);
-        webhookUrl = setting(properties, "webhook.url", "WEBHOOK_URL", "");
-        webhookTimeoutMs = parseInt(setting(properties, "webhook.timeoutMs", "WEBHOOK_TIMEOUT_MS", "5000"),
+        webhookUrl = setting(properties, environment, "webhook.url", "WEBHOOK_URL", "");
+        webhookTimeoutMs = parseInt(
+                setting(properties, environment, "webhook.timeoutMs", "WEBHOOK_TIMEOUT_MS", "5000"),
                 "webhook.timeoutMs", 100, 60_000);
-        dbPath = setting(properties, "db.path", "PAYOUT_DB_PATH", "data/payout.db");
-        confirmDelayMs = parseLong(setting(properties, "confirm.delayMs", "CONFIRM_DELAY_MS", "12000"),
+        dbPath = setting(properties, environment, "db.path", "PAYOUT_DB_PATH", "data/payout.db");
+        confirmDelayMs = parseLong(setting(properties, environment, "confirm.delayMs", "CONFIRM_DELAY_MS", "12000"),
                 "confirm.delayMs", 200, 120_000);
-        confirmAttempts = parseInt(setting(properties, "confirm.attempts", "CONFIRM_ATTEMPTS", "4"),
+        confirmAttempts = parseInt(
+                setting(properties, environment, "confirm.attempts", "CONFIRM_ATTEMPTS", "4"),
                 "confirm.attempts", 1, 30);
-        messageTtlMs = parseLong(setting(properties, "message.ttlMs", "MESSAGE_TTL_MS", "960000"),
+        messageTtlMs = parseLong(setting(properties, environment, "message.ttlMs", "MESSAGE_TTL_MS", "960000"),
                 "message.ttlMs", 960_000, 86_400_000);
-        feeReserveNano = parseLong(setting(properties, "wallet.feeReserveNano", "FEE_RESERVE_NANO", "50000000"),
+        feeReserveNano = parseLong(
+                setting(properties, environment, "wallet.feeReserveNano", "FEE_RESERVE_NANO", "50000000"),
                 "wallet.feeReserveNano", 0, 10_000_000_000L);
         feePerTransferNano = parseLong(
-                setting(properties, "wallet.feePerTransferNano", "FEE_PER_TRANSFER_NANO", "8000000"),
+                setting(properties, environment, "wallet.feePerTransferNano", "FEE_PER_TRANSFER_NANO", "8000000"),
                 "wallet.feePerTransferNano", 0, 10_000_000_000L);
-        pauseRetryMs = parseLong(setting(properties, "pause.retryMs", "PAUSE_RETRY_MS", "15000"),
+        pauseRetryMs = parseLong(setting(properties, environment, "pause.retryMs", "PAUSE_RETRY_MS", "15000"),
                 "pause.retryMs", 200, 600_000);
-        alertUrl = setting(properties, "alert.url", "ALERT_URL", "");
-        sendingStaleMs = parseLong(setting(properties, "sending.staleMs", "SENDING_STALE_MS", "300000"),
+        alertUrl = setting(properties, environment, "alert.url", "ALERT_URL", "");
+        sendingStaleMs = parseLong(
+                setting(properties, environment, "sending.staleMs", "SENDING_STALE_MS", "300000"),
                 "sending.staleMs", 1_000, 86_400_000);
         housekeepingRetentionMs = parseLong(
-                setting(properties, "housekeeping.retentionMs", "HOUSEKEEPING_RETENTION_MS", "2592000000"),
+                setting(properties, environment, "housekeeping.retentionMs", "HOUSEKEEPING_RETENTION_MS", "2592000000"),
                 "housekeeping.retentionMs", 1_000, 630_720_000_000L);
         housekeepingIntervalMs = parseLong(
-                setting(properties, "housekeeping.intervalMs", "HOUSEKEEPING_INTERVAL_MS", "86400000"),
+                setting(properties, environment, "housekeeping.intervalMs", "HOUSEKEEPING_INTERVAL_MS", "86400000"),
                 "housekeeping.intervalMs", 1_000, 2_592_000_000L);
     }
 
@@ -91,10 +106,12 @@ public final class EngineConfig {
         return new EngineConfig(properties);
     }
 
-    private static String setting(Properties properties, String key, String env, String fallback) {
-        String fromEnv = System.getenv(env);
-        if (fromEnv != null && !fromEnv.isBlank()) {
-            return fromEnv.trim();
+    private static String setting(Properties properties, boolean environment, String key, String env, String fallback) {
+        if (environment) {
+            String fromEnv = System.getenv(env);
+            if (fromEnv != null && !fromEnv.isBlank()) {
+                return fromEnv.trim();
+            }
         }
         String value = properties.getProperty(key);
         if (value == null || value.isBlank()) {
