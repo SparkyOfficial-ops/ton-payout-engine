@@ -94,7 +94,7 @@ public final class PayoutBatcher {
                     if (!buffer.isEmpty()) {
                         flushAt = System.currentTimeMillis() + config.batchWindowMs();
                     }
-                    dispatch(chunk);
+                    dispatch(chunk, buffer);
                 }
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
@@ -105,33 +105,55 @@ public final class PayoutBatcher {
         }
     }
 
-    private void dispatch(List<Item> chunk) {
-        List<Transfer> transfers = new ArrayList<>(chunk.size());
+    private void dispatch(List<Item> chunk, List<Item> buffer) {
+        List<Item> live = new ArrayList<>(chunk.size());
         for (Item item : chunk) {
+            Batch batch = batches.get(item.batchId);
+            if (batch == null) {
+                continue;
+            }
+            synchronized (batch) {
+                if ("failed".equals(batch.status)) {
+                    continue;
+                }
+            }
+            live.add(item);
+        }
+        if (live.isEmpty()) {
+            return;
+        }
+
+        List<Transfer> transfers = new ArrayList<>(live.size());
+        for (Item item : live) {
             transfers.add(item.transfer);
         }
         String txHash = null;
-        String status = "held";
+        String status;
         String error = null;
         try {
-            if (chain.isReady()) {
-                txHash = chain.send(transfers);
-                status = "sent";
-            } else {
-                LOG.info("held " + transfers.size() + " transfers; chain sender is not wired");
+            if (!chain.isReady()) {
+                throw new IllegalStateException("wallet address or key file is not set");
             }
+            txHash = chain.send(transfers);
+            status = "sent";
+            LOG.info("bus of " + transfers.size() + " transfers sent, hash " + txHash);
         } catch (Exception e) {
             status = "failed";
             error = e.getMessage();
-            LOG.log(Level.WARNING, "chain send failed", e);
+            LOG.log(Level.WARNING, "bus of " + transfers.size() + " transfers failed", e);
         }
 
         Map<String, Integer> counts = new HashMap<>();
-        for (Item item : chunk) {
+        for (Item item : live) {
             counts.merge(item.batchId, 1, Integer::sum);
         }
         for (Map.Entry<String, Integer> entry : counts.entrySet()) {
             finish(entry.getKey(), entry.getValue(), status, txHash, error);
+            if ("failed".equals(status)) {
+                String batchId = entry.getKey();
+                buffer.removeIf(item -> batchId.equals(item.batchId));
+                queue.removeIf(item -> batchId.equals(item.batchId));
+            }
         }
     }
 
@@ -142,17 +164,20 @@ public final class PayoutBatcher {
         String notifyError = error;
         String notifyTx = txHash;
         synchronized (batch) {
+            boolean alreadyDone = "sent".equals(batch.status) || "failed".equals(batch.status);
             if ("failed".equals(status)) {
                 batch.status = "failed";
                 batch.error = error;
                 batch.pending = 0;
-                terminal = true;
+                terminal = !alreadyDone;
             } else {
                 batch.pending -= done;
-                if (txHash != null) {
-                    batch.txHash = txHash;
+                if (txHash != null && !txHash.isBlank()) {
+                    batch.txHash = batch.txHash == null ? txHash : batch.txHash + "," + txHash;
                 }
-                if (batch.pending <= 0 && !"failed".equals(batch.status)) {
+                if (batch.pending > 0) {
+                    batch.status = "sending";
+                } else if (!"failed".equals(batch.status)) {
                     batch.pending = 0;
                     batch.status = status;
                     terminal = true;

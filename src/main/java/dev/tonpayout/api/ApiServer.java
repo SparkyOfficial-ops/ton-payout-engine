@@ -3,6 +3,7 @@ package dev.tonpayout.api;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
+import java.math.BigDecimal;
 import java.math.BigInteger;
 import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
@@ -15,6 +16,7 @@ import java.util.logging.Logger;
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpServer;
 
+import dev.tonpayout.chain.ChainSender;
 import dev.tonpayout.config.EngineConfig;
 import dev.tonpayout.json.Json;
 import dev.tonpayout.queue.PayoutBatcher;
@@ -27,11 +29,13 @@ public final class ApiServer {
 
     private final EngineConfig config;
     private final PayoutBatcher batcher;
+    private final ChainSender chain;
     private HttpServer server;
 
-    public ApiServer(EngineConfig config, PayoutBatcher batcher) {
+    public ApiServer(EngineConfig config, PayoutBatcher batcher, ChainSender chain) {
         this.config = config;
         this.batcher = batcher;
+        this.chain = chain;
     }
 
     public void start() throws IOException {
@@ -120,10 +124,16 @@ public final class ApiServer {
         }
         Map<String, Object> body = new LinkedHashMap<>();
         body.put("address", config.walletAddress());
-        body.put("balanceNano", null);
         body.put("network", config.tonNetwork());
         body.put("endpoint", config.tonEndpoint());
-        send(exchange, 200, body);
+        try {
+            body.put("balanceNano", chain.balanceNano());
+            send(exchange, 200, body);
+        } catch (Exception e) {
+            body.put("balanceNano", null);
+            body.put("error", e.getMessage());
+            send(exchange, 502, body);
+        }
     }
 
     private boolean authorized(HttpExchange exchange) throws IOException {
@@ -155,8 +165,8 @@ public final class ApiServer {
         List<Transfer> transfers = new ArrayList<>(list.size());
         for (Object item : list) {
             Map<String, Object> row = Json.asObject(item);
-            String to = text(row.get("to"));
-            String amount = text(row.get("amountNano"));
+            String to = row.get("to") != null ? text(row.get("to")) : text(row.get("address"));
+            String amount = nanoAmount(row);
             String comment = row.get("comment") == null ? "" : text(row.get("comment"));
             if (to.isBlank() || to.length() > 128) {
                 throw new IllegalArgumentException("invalid destination");
@@ -164,6 +174,14 @@ public final class ApiServer {
             if (comment.length() > 120) {
                 throw new IllegalArgumentException("comment is too long");
             }
+            transfers.add(new Transfer(to, amount, comment));
+        }
+        return transfers;
+    }
+
+    private static String nanoAmount(Map<String, Object> row) {
+        if (row.get("amountNano") != null) {
+            String amount = text(row.get("amountNano")).trim();
             try {
                 if (new BigInteger(amount).signum() <= 0) {
                     throw new IllegalArgumentException("amountNano must be positive");
@@ -171,9 +189,20 @@ public final class ApiServer {
             } catch (NumberFormatException e) {
                 throw new IllegalArgumentException("amountNano must be a positive integer string");
             }
-            transfers.add(new Transfer(to, amount, comment));
+            return amount;
         }
-        return transfers;
+        if (row.get("amount") == null) {
+            throw new IllegalArgumentException("amount or amountNano is required");
+        }
+        try {
+            BigDecimal ton = new BigDecimal(text(row.get("amount")).trim());
+            if (ton.signum() <= 0) {
+                throw new IllegalArgumentException("amount must be positive");
+            }
+            return ton.movePointRight(9).toBigIntegerExact().toString();
+        } catch (NumberFormatException | ArithmeticException e) {
+            throw new IllegalArgumentException("amount must be a positive TON value with at most 9 decimal places");
+        }
     }
 
     private static String text(Object value) {

@@ -8,12 +8,22 @@
     <artifactId>ton-payout-engine</artifactId>
     <version>0.1.0-SNAPSHOT</version>
     <name>ton-payout-engine</name>
-    <description>Minimal skeleton of a highload TON payout gateway. Chain send is not wired yet.</description>
+    <description>Highload TON payout gateway. Chain send goes through cton-sdk HighloadWallet.</description>
 
     <properties>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
         <maven.compiler.release>17</maven.compiler.release>
+        <cton.version>0.1.0-SNAPSHOT</cton.version>
     </properties>
+
+    <dependencies>
+        <!-- Install the sibling SDK first: mvn -f ../cton-sdk-main/pom.xml install -DskipTests -->
+        <dependency>
+            <groupId>com.cton</groupId>
+            <artifactId>ton-sdk-contract</artifactId>
+            <version>${cton.version}</version>
+        </dependency>
+    </dependencies>
 
     <build>
         <plugins>

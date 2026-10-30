@@ -1,4 +1,5 @@
 target/
+lib/
 secrets/
 *.key
 .env
