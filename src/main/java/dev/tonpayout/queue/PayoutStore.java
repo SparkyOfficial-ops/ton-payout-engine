@@ -55,6 +55,7 @@ public final class PayoutStore implements AutoCloseable {
             statement.execute("CREATE INDEX IF NOT EXISTS idx_transfers_batch ON transfers(batch_id)");
             statement.execute("CREATE INDEX IF NOT EXISTS idx_transfers_status ON transfers(status)");
         }
+        addColumn("confirm_checks", "INTEGER NOT NULL DEFAULT 0");
     }
 
     public synchronized List<QueuedTransfer> insertQueued(String batchId, List<Transfer> transfers) throws SQLException {
@@ -191,8 +192,10 @@ public final class PayoutStore implements AutoCloseable {
             }
             int open = countOpen(batchId);
             String status = open == 0 ? "sent" : "sending";
-            try (PreparedStatement statement = connection.prepareStatement(
-                    "UPDATE batches SET status = ?, tx_hash = ?, updated_at = ? WHERE id = ?")) {
+            String sql = open == 0
+                    ? "UPDATE batches SET status = ?, tx_hash = ?, updated_at = ?, confirm_checks = 0 WHERE id = ?"
+                    : "UPDATE batches SET status = ?, tx_hash = ?, updated_at = ? WHERE id = ?";
+            try (PreparedStatement statement = connection.prepareStatement(sql)) {
                 statement.setString(1, status);
                 statement.setString(2, merged);
                 statement.setLong(3, System.currentTimeMillis());
@@ -227,6 +230,100 @@ public final class PayoutStore implements AutoCloseable {
             }
             connection.commit();
             return outcome(batchId, !alreadyFailed);
+        } catch (SQLException e) {
+            connection.rollback();
+            throw e;
+        } finally {
+            connection.setAutoCommit(true);
+        }
+    }
+
+    public synchronized List<SentBatch> sentBefore(long updatedAt) throws SQLException {
+        List<SentBatch> rows = new ArrayList<>();
+        try (PreparedStatement statement = connection.prepareStatement(
+                "SELECT id, total, tx_hash, confirm_checks FROM batches WHERE status = 'sent' AND updated_at <= ?")) {
+            statement.setLong(1, updatedAt);
+            try (ResultSet result = statement.executeQuery()) {
+                while (result.next()) {
+                    rows.add(new SentBatch(
+                            result.getString(1),
+                            result.getInt(2),
+                            result.getString(3),
+                            result.getInt(4)));
+                }
+            }
+        }
+        return rows;
+    }
+
+    public synchronized BatchOutcome markConfirmed(String batchId) throws SQLException {
+        connection.setAutoCommit(false);
+        try {
+            int changed;
+            try (PreparedStatement batch = connection.prepareStatement(
+                    "UPDATE batches SET status = 'confirmed', updated_at = ? WHERE id = ? AND status = 'sent'")) {
+                batch.setLong(1, System.currentTimeMillis());
+                batch.setString(2, batchId);
+                changed = batch.executeUpdate();
+            }
+            try (PreparedStatement transfers = connection.prepareStatement(
+                    "UPDATE transfers SET status = 'confirmed' WHERE batch_id = ? AND status = 'sent'")) {
+                transfers.setString(1, batchId);
+                transfers.executeUpdate();
+            }
+            connection.commit();
+            return outcome(batchId, changed > 0);
+        } catch (SQLException e) {
+            connection.rollback();
+            throw e;
+        } finally {
+            connection.setAutoCommit(true);
+        }
+    }
+
+    public synchronized void delayConfirmation(String batchId) throws SQLException {
+        try (PreparedStatement statement = connection.prepareStatement(
+                "UPDATE batches SET updated_at = ? WHERE id = ? AND status = 'sent'")) {
+            statement.setLong(1, System.currentTimeMillis());
+            statement.setString(2, batchId);
+            statement.executeUpdate();
+        }
+    }
+
+    public synchronized int noteConfirmationMiss(String batchId) throws SQLException {
+        try (PreparedStatement statement = connection.prepareStatement(
+                "UPDATE batches SET confirm_checks = confirm_checks + 1, updated_at = ? WHERE id = ? AND status = 'sent'")) {
+            statement.setLong(1, System.currentTimeMillis());
+            statement.setString(2, batchId);
+            statement.executeUpdate();
+        }
+        try (PreparedStatement statement = connection.prepareStatement(
+                "SELECT confirm_checks FROM batches WHERE id = ?")) {
+            statement.setString(1, batchId);
+            try (ResultSet result = statement.executeQuery()) {
+                return result.next() ? result.getInt(1) : 0;
+            }
+        }
+    }
+
+    public synchronized BatchOutcome markNotInBlock(String batchId, String error) throws SQLException {
+        connection.setAutoCommit(false);
+        try {
+            int changed;
+            try (PreparedStatement batch = connection.prepareStatement(
+                    "UPDATE batches SET status = 'failed', error = ?, updated_at = ? WHERE id = ? AND status = 'sent'")) {
+                batch.setString(1, error);
+                batch.setLong(2, System.currentTimeMillis());
+                batch.setString(3, batchId);
+                changed = batch.executeUpdate();
+            }
+            try (PreparedStatement transfers = connection.prepareStatement(
+                    "UPDATE transfers SET status = 'failed' WHERE batch_id = ? AND status = 'sent'")) {
+                transfers.setString(1, batchId);
+                transfers.executeUpdate();
+            }
+            connection.commit();
+            return outcome(batchId, changed > 0);
         } catch (SQLException e) {
             connection.rollback();
             throw e;
@@ -318,9 +415,23 @@ public final class PayoutStore implements AutoCloseable {
         }
     }
 
+    private void addColumn(String name, String definition) throws SQLException {
+        try (Statement statement = connection.createStatement()) {
+            statement.execute("ALTER TABLE batches ADD COLUMN " + name + " " + definition);
+        } catch (SQLException e) {
+            String message = e.getMessage() == null ? "" : e.getMessage().toLowerCase();
+            if (!message.contains("duplicate column")) {
+                throw e;
+            }
+        }
+    }
+
     public record QueuedTransfer(long id, String batchId, Transfer transfer) {
     }
 
     public record BatchOutcome(String batchId, String status, int count, String txHash, String error, boolean terminal) {
+    }
+
+    public record SentBatch(String batchId, int count, String txHash, int checks) {
     }
 }

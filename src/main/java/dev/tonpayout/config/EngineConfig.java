@@ -21,6 +21,8 @@ public final class EngineConfig {
     private final String webhookUrl;
     private final int webhookTimeoutMs;
     private final String dbPath;
+    private final long confirmDelayMs;
+    private final int confirmAttempts;
 
     private EngineConfig(Properties properties) {
         httpHost = setting(properties, "http.host", "PAYOUT_HTTP_HOST", "0.0.0.0");
@@ -41,6 +43,10 @@ public final class EngineConfig {
         webhookTimeoutMs = parseInt(setting(properties, "webhook.timeoutMs", "WEBHOOK_TIMEOUT_MS", "5000"),
                 "webhook.timeoutMs", 100, 60_000);
         dbPath = setting(properties, "db.path", "PAYOUT_DB_PATH", "data/payout.db");
+        confirmDelayMs = parseLong(setting(properties, "confirm.delayMs", "CONFIRM_DELAY_MS", "12000"),
+                "confirm.delayMs", 200, 120_000);
+        confirmAttempts = parseInt(setting(properties, "confirm.attempts", "CONFIRM_ATTEMPTS", "4"),
+                "confirm.attempts", 1, 30);
     }
 
     public static EngineConfig load() throws IOException {
@@ -101,4 +107,6 @@ public final class EngineConfig {
     public String webhookUrl() { return webhookUrl; }
     public int webhookTimeoutMs() { return webhookTimeoutMs; }
     public String dbPath() { return dbPath; }
+    public long confirmDelayMs() { return confirmDelayMs; }
+    public int confirmAttempts() { return confirmAttempts; }
 }
