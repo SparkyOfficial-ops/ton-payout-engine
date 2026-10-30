@@ -7,8 +7,10 @@ import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Base64;
 import java.util.List;
+import java.util.logging.Logger;
 
 import com.cton.api.TonApiClient;
+import com.cton.contract.BaseWallet;
 import com.cton.contract.BulkTransfer;
 import com.cton.contract.HighloadWallet;
 import com.cton.sdk.Address;
@@ -23,6 +25,8 @@ import dev.tonpayout.queue.Transfer;
  * Cell, Boc, and HashmapE stay inside HighloadWallet.sendBulkTransfer.
  */
 public final class CtonChainSender implements ChainSender {
+    private static final Logger LOG = Logger.getLogger(CtonChainSender.class.getName());
+
     private final EngineConfig config;
     private final TonApiClient api;
     private final Path keyPath;
@@ -40,7 +44,7 @@ public final class CtonChainSender implements ChainSender {
     }
 
     @Override
-    public String send(List<Transfer> transfers) throws Exception {
+    public Outgoing prepare(List<Transfer> transfers) throws Exception {
         if (transfers.isEmpty() || transfers.size() > 254) {
             throw new IllegalArgumentException("a highload batch must contain 1..254 transfers");
         }
@@ -51,7 +55,8 @@ public final class CtonChainSender implements ChainSender {
         List<Address> destinations = new ArrayList<>(transfers.size());
         try (Crypto.PrivateKey key = loadKey();
              Address self = new Address(config.walletAddress())) {
-            HighloadWallet wallet = new HighloadWallet(self, api, config.subwalletId());
+            HighloadWallet wallet = new HighloadWallet(
+                    self, api, config.subwalletId(), queryTtlSeconds(config.messageTtlMs()));
             BulkTransfer[] bulk = new BulkTransfer[transfers.size()];
             for (int i = 0; i < transfers.size(); i++) {
                 Transfer transfer = transfers.get(i);
@@ -62,16 +67,34 @@ public final class CtonChainSender implements ChainSender {
                         : transfer.comment();
                 bulk[i] = new BulkTransfer(destination, new BigInteger(transfer.amountNano()), comment);
             }
-            String hash = wallet.sendBulkTransfer(bulk, key);
-            if (hash == null || hash.isBlank()) {
-                throw new java.io.IOException("TON Center did not return a message hash");
-            }
-            return hash;
+            HighloadWallet.PreparedBulk prepared = wallet.prepareBulkTransfer(bulk, key);
+            return new Outgoing(prepared.hashHex(), prepared.boc());
         } finally {
             for (Address destination : destinations) {
                 destination.close();
             }
         }
+    }
+
+    @Override
+    public void broadcast(Outgoing message) throws Exception {
+        String reported = BaseWallet.messageHash(api.sendBoc(message.boc()));
+        if (!MessageHashes.normalize(message.hash()).equals(MessageHashes.normalize(reported))) {
+            LOG.warning("toncenter sendBoc hash " + reported
+                    + " differs from the stored message hash " + message.hash());
+        }
+    }
+
+    /**
+     * On-chain lifetime of the external message. The engine marks the batch failed
+     * only after {@code messageTtlMs}, one minute later.
+     */
+    public static int queryTtlSeconds(long messageTtlMs) {
+        long seconds = (messageTtlMs - 60_000L) / 1000L;
+        if (seconds < 15 * 60L || seconds > 24 * 60 * 60L) {
+            throw new IllegalArgumentException("highload query ttl is out of range");
+        }
+        return (int) seconds;
     }
 
     @Override

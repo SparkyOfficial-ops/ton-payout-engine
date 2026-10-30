@@ -11,6 +11,8 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 
@@ -18,6 +20,7 @@ import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpServer;
 
 import dev.tonpayout.chain.ChainSender;
+import dev.tonpayout.chain.TonAddress;
 import dev.tonpayout.config.EngineConfig;
 import dev.tonpayout.json.Json;
 import dev.tonpayout.queue.PayoutBatcher;
@@ -37,6 +40,7 @@ public final class ApiServer {
     private final SendingRecovery recovery;
     private final PayoutStore store;
     private HttpServer server;
+    private ExecutorService httpExecutor;
 
     public ApiServer(EngineConfig config, PayoutBatcher batcher, ChainSender chain, SendingRecovery recovery,
             PayoutStore store) {
@@ -54,6 +58,12 @@ public final class ApiServer {
         server.createContext("/api/v1/status", this::status);
         server.createContext("/api/v1/balance", this::balance);
         server.createContext("/api/v1/recovery", this::recovery);
+        httpExecutor = Executors.newFixedThreadPool(16, runnable -> {
+            Thread thread = new Thread(runnable, "http");
+            thread.setDaemon(true);
+            return thread;
+        });
+        server.setExecutor(httpExecutor);
         server.start();
         LOG.info("http " + config.httpHost() + ":" + config.httpPort()
                 + " wallet=" + (config.walletAddress().isBlank() ? "unset" : config.walletAddress())
@@ -63,6 +73,9 @@ public final class ApiServer {
     public void stop() {
         if (server != null) {
             server.stop(0);
+        }
+        if (httpExecutor != null) {
+            httpExecutor.shutdown();
         }
     }
 
@@ -231,9 +244,11 @@ public final class ApiServer {
             String to = row.get("to") != null ? text(row.get("to")) : text(row.get("address"));
             String amount = nanoAmount(row);
             String comment = row.get("comment") == null ? "" : text(row.get("comment"));
-            if (to.isBlank() || to.length() > 128) {
+            String destination = TonAddress.canonical(to);
+            if (destination == null) {
                 throw new IllegalArgumentException("invalid destination");
             }
+            to = destination;
             if (comment.length() > 120) {
                 throw new IllegalArgumentException("comment is too long");
             }

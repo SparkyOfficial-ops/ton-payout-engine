@@ -9,9 +9,12 @@ import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Statement;
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+
+import dev.tonpayout.chain.MessageHashes;
 
 public final class PayoutStore implements AutoCloseable {
     private static final int BUSY_TIMEOUT_MS = 5_000;
@@ -62,7 +65,9 @@ public final class PayoutStore implements AutoCloseable {
         addColumn("confirm_checks", "INTEGER NOT NULL DEFAULT 0");
         addColumn("idempotency_key", "TEXT");
         addColumn("request_hash", "TEXT");
+        addColumn("sent_at", "INTEGER");
         try (Statement statement = connection.createStatement()) {
+            statement.execute("UPDATE batches SET sent_at = updated_at WHERE sent_at IS NULL AND status = 'sent'");
             statement.execute(
                     "CREATE UNIQUE INDEX IF NOT EXISTS idx_batches_idempotency ON batches(idempotency_key)");
             statement.execute("CREATE INDEX IF NOT EXISTS idx_batches_updated ON batches(updated_at)");
@@ -229,23 +234,19 @@ public final class PayoutStore implements AutoCloseable {
         connection.setAutoCommit(false);
         try {
             updateTransferStatus(transferIds, "sent");
-            String merged = txHash;
-            String existing = selectHash(batchId);
-            if (existing != null && !existing.isBlank() && txHash != null && !txHash.isBlank()) {
-                merged = existing + "," + txHash;
-            } else if (txHash == null || txHash.isBlank()) {
-                merged = existing;
-            }
+            String merged = mergeHash(selectHash(batchId), txHash);
             int open = countOpen(batchId);
             String status = open == 0 ? "sent" : "sending";
+            long now = System.currentTimeMillis();
             String sql = open == 0
-                    ? "UPDATE batches SET status = ?, tx_hash = ?, updated_at = ?, confirm_checks = 0 WHERE id = ?"
-                    : "UPDATE batches SET status = ?, tx_hash = ?, updated_at = ? WHERE id = ?";
+                    ? "UPDATE batches SET status = ?, tx_hash = ?, updated_at = ?, sent_at = ?, confirm_checks = 0 WHERE id = ?"
+                    : "UPDATE batches SET status = ?, tx_hash = ?, updated_at = ?, sent_at = ? WHERE id = ?";
             try (PreparedStatement statement = connection.prepareStatement(sql)) {
                 statement.setString(1, status);
                 statement.setString(2, merged);
-                statement.setLong(3, System.currentTimeMillis());
-                statement.setString(4, batchId);
+                statement.setLong(3, now);
+                statement.setLong(4, now);
+                statement.setString(5, batchId);
                 statement.executeUpdate();
             }
             connection.commit();
@@ -256,6 +257,49 @@ public final class PayoutStore implements AutoCloseable {
         } finally {
             connection.setAutoCommit(true);
         }
+    }
+
+    public synchronized void rememberHash(Collection<String> batchIds, String txHash) throws SQLException {
+        if (batchIds.isEmpty() || txHash == null || txHash.isBlank()) {
+            throw new SQLException("message hash was not stored");
+        }
+        connection.setAutoCommit(false);
+        try {
+            long now = System.currentTimeMillis();
+            for (String batchId : batchIds) {
+                try (PreparedStatement statement = connection.prepareStatement(
+                        "UPDATE batches SET tx_hash = ?, updated_at = ? WHERE id = ? AND status = 'sending'")) {
+                    statement.setString(1, mergeHash(selectHash(batchId), txHash));
+                    statement.setLong(2, now);
+                    statement.setString(3, batchId);
+                    if (statement.executeUpdate() != 1) {
+                        throw new SQLException("batch was not sending when the message hash was stored: " + batchId);
+                    }
+                }
+            }
+            connection.commit();
+        } catch (SQLException e) {
+            connection.rollback();
+            throw e;
+        } finally {
+            connection.setAutoCommit(true);
+        }
+    }
+
+    private static String mergeHash(String existing, String txHash) {
+        if (txHash == null || txHash.isBlank()) {
+            return existing;
+        }
+        if (existing == null || existing.isBlank()) {
+            return txHash;
+        }
+        String needle = MessageHashes.normalize(txHash);
+        for (String part : MessageHashes.split(existing)) {
+            if (needle.equals(MessageHashes.normalize(part))) {
+                return existing;
+            }
+        }
+        return existing + "," + txHash;
     }
 
     public synchronized BatchOutcome markFailed(String batchId, String error) throws SQLException {
@@ -287,7 +331,8 @@ public final class PayoutStore implements AutoCloseable {
     public synchronized List<SentBatch> sentBefore(long updatedAt) throws SQLException {
         List<SentBatch> rows = new ArrayList<>();
         try (PreparedStatement statement = connection.prepareStatement(
-                "SELECT id, total, tx_hash, confirm_checks FROM batches WHERE status = 'sent' AND updated_at <= ?")) {
+                "SELECT id, total, tx_hash, confirm_checks, sent_at, created_at "
+                        + "FROM batches WHERE status = 'sent' AND updated_at <= ?")) {
             statement.setLong(1, updatedAt);
             try (ResultSet result = statement.executeQuery()) {
                 while (result.next()) {
@@ -295,7 +340,9 @@ public final class PayoutStore implements AutoCloseable {
                             result.getString(1),
                             result.getInt(2),
                             result.getString(3),
-                            result.getInt(4)));
+                            result.getInt(4),
+                            result.getLong(5),
+                            result.getLong(6)));
                 }
             }
         }
@@ -305,7 +352,7 @@ public final class PayoutStore implements AutoCloseable {
     public synchronized List<StuckSending> staleSending(long updatedBefore) throws SQLException {
         List<StuckSending> rows = new ArrayList<>();
         try (PreparedStatement statement = connection.prepareStatement(
-                "SELECT id, total, tx_hash FROM batches WHERE status = 'sending' AND updated_at <= ?")) {
+                "SELECT id, total, tx_hash, updated_at FROM batches WHERE status = 'sending' AND updated_at <= ?")) {
             statement.setLong(1, updatedBefore);
             try (ResultSet result = statement.executeQuery()) {
                 while (result.next()) {
@@ -314,7 +361,8 @@ public final class PayoutStore implements AutoCloseable {
                     if (counts[0] == 0 || counts[2] > 0) {
                         continue;
                     }
-                    rows.add(new StuckSending(batchId, result.getInt(2), result.getString(3), counts[0], counts[1]));
+                    rows.add(new StuckSending(
+                            batchId, result.getInt(2), result.getString(3), counts[0], counts[1], result.getLong(4)));
                 }
             }
         }
@@ -673,13 +721,28 @@ public final class PayoutStore implements AutoCloseable {
     }
 
     private void attachArchive(Path database) throws SQLException {
-        String sqlPath = archivePath(database).toString().replace("'", "''");
+        Path archive = archivePath(database);
+        prepareArchive(archive);
+        String sqlPath = archive.toString().replace("'", "''");
         try (Statement statement = connection.createStatement()) {
             statement.execute("ATTACH DATABASE '" + sqlPath + "' AS archive");
             statement.execute("PRAGMA archive.journal_mode=WAL");
             statement.execute("PRAGMA archive.synchronous=FULL");
+        }
+    }
+
+    /**
+     * Tables and indexes are created on a connection whose main database is the archive file.
+     * Creating them through ATTACH can bind {@code batches} to the hot database instead.
+     */
+    private static void prepareArchive(Path archive) throws SQLException {
+        try (Connection archiveConnection = DriverManager.getConnection("jdbc:sqlite:" + archive.toAbsolutePath());
+             Statement statement = archiveConnection.createStatement()) {
+            statement.execute("PRAGMA journal_mode=WAL");
+            statement.execute("PRAGMA synchronous=FULL");
+            statement.execute("PRAGMA busy_timeout=" + BUSY_TIMEOUT_MS);
             statement.execute("""
-                    CREATE TABLE IF NOT EXISTS archive.batches (
+                    CREATE TABLE IF NOT EXISTS batches (
                         id TEXT PRIMARY KEY,
                         status TEXT NOT NULL,
                         total INTEGER NOT NULL,
@@ -694,9 +757,9 @@ public final class PayoutStore implements AutoCloseable {
                     )
                     """);
             statement.execute(
-                    "CREATE UNIQUE INDEX IF NOT EXISTS archive.idx_archive_idempotency ON batches(idempotency_key)");
+                    "CREATE UNIQUE INDEX IF NOT EXISTS idx_archive_idempotency ON batches(idempotency_key)");
             statement.execute("""
-                    CREATE TABLE IF NOT EXISTS archive.transfers (
+                    CREATE TABLE IF NOT EXISTS transfers (
                         id INTEGER PRIMARY KEY,
                         batch_id TEXT NOT NULL,
                         destination TEXT NOT NULL,
@@ -707,7 +770,7 @@ public final class PayoutStore implements AutoCloseable {
                     )
                     """);
             statement.execute(
-                    "CREATE INDEX IF NOT EXISTS archive.idx_archive_transfers_batch ON transfers(batch_id)");
+                    "CREATE INDEX IF NOT EXISTS idx_archive_transfers_batch ON transfers(batch_id)");
         }
     }
 
@@ -777,10 +840,10 @@ public final class PayoutStore implements AutoCloseable {
     public record BatchOutcome(String batchId, String status, int count, String txHash, String error, boolean terminal) {
     }
 
-    public record SentBatch(String batchId, int count, String txHash, int checks) {
+    public record SentBatch(String batchId, int count, String txHash, int checks, long sentAt, long createdAt) {
     }
 
-    public record StuckSending(String batchId, int count, String txHash, int sending, int sent) {
+    public record StuckSending(String batchId, int count, String txHash, int sending, int sent, long updatedAt) {
     }
 
     public record IdempotentHit(Map<String, Object> status, String requestHash) {

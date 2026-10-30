@@ -34,7 +34,7 @@ public final class TonCenterBlockInclusion implements BlockInclusion {
     }
 
     @Override
-    public boolean allIncluded(List<String> messageHashes) throws Exception {
+    public List<?> recentTransactions() throws Exception {
         if (config.walletAddress().isBlank()) {
             throw new IllegalStateException("wallet address is not set");
         }
@@ -63,34 +63,38 @@ public final class TonCenterBlockInclusion implements BlockInclusion {
         if (!(result instanceof List<?> transactions)) {
             throw new IOException("getTransactions result is not a list");
         }
+        LOG.info("toncenter getTransactions returned " + transactions.size());
         LOG.info("toncenter first transaction json: " + firstResultObject(raw));
+        if (!transactions.isEmpty()) {
+            Object first = transactions.get(0);
+            LOG.info("toncenter tx[0] in_msg.hash='" + MessageHashes.fieldText(first, "hash")
+                    + "' in_msg.body_hash='" + MessageHashes.fieldText(first, "body_hash") + "'");
+        }
+        return transactions;
+    }
+
+    @Override
+    public boolean allIncluded(List<String> messageHashes) throws Exception {
+        return allIncluded(recentTransactions(), messageHashes);
+    }
+
+    @Override
+    public boolean allIncluded(List<?> transactions, List<String> messageHashes) {
         for (String hash : messageHashes) {
-            if (match(transactions, hash) == null) {
+            if (!contains(transactions, hash)) {
                 return false;
             }
         }
         return true;
     }
 
-    private static String match(List<?> transactions, String expected) {
-        LOG.info("confirm seek sendBoc hash '" + expected + "'");
-        String found = null;
-        int index = 0;
+    private static boolean contains(List<?> transactions, String expected) {
         for (Object transaction : transactions) {
-            String hash = MessageHashes.fieldText(transaction, "hash");
-            String bodyHash = MessageHashes.fieldText(transaction, "body_hash");
-            String field = MessageHashes.inMessageField(transaction, expected);
-            LOG.info("toncenter tx[" + index + "] in_msg.hash='" + hash + "' in_msg.body_hash='" + bodyHash + "'"
-                    + (field == null ? "" : " matched " + field));
-            if (field != null && found == null) {
-                found = field;
+            if (MessageHashes.inMessageField(transaction, expected) != null) {
+                return true;
             }
-            index++;
         }
-        if (transactions.isEmpty()) {
-            LOG.info("toncenter getTransactions returned no transactions");
-        }
-        return found;
+        return false;
     }
 
     /** First object of the {@code result} array, copied from the Toncenter body without rewriting. */

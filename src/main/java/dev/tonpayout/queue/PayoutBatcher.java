@@ -17,6 +17,8 @@ import java.util.logging.Level;
 import java.util.logging.Logger;
 
 import dev.tonpayout.chain.ChainSender;
+import dev.tonpayout.chain.ChainSender.Outgoing;
+import dev.tonpayout.chain.TonAddress;
 import dev.tonpayout.config.EngineConfig;
 import dev.tonpayout.notify.WebhookNotifier;
 import dev.tonpayout.queue.PayoutStore.BatchOutcome;
@@ -181,6 +183,10 @@ public final class PayoutBatcher {
         if (live.isEmpty()) {
             return 0;
         }
+        live = withoutPoison(live, buffer);
+        if (live.isEmpty()) {
+            return 0;
+        }
 
         List<Long> ids = new ArrayList<>(live.size());
         List<Transfer> transfers = new ArrayList<>(live.size());
@@ -214,10 +220,49 @@ public final class PayoutBatcher {
 
         try {
             store.markSending(ids);
-            String txHash = chain.send(transfers);
-            LOG.info("bus of " + transfers.size() + " transfers sent, hash " + txHash);
-            for (Map.Entry<String, List<Long>> entry : byBatch.entrySet()) {
-                notify(store.markSent(entry.getKey(), entry.getValue(), txHash));
+            Outgoing outgoing;
+            try {
+                outgoing = chain.prepare(transfers);
+            } catch (Exception e) {
+                LOG.log(Level.WARNING, "bus of " + transfers.size() + " transfers was not signed", e);
+                String message = e.getMessage() == null ? e.getClass().getSimpleName() : e.getMessage();
+                fail(byBatch, buffer, message);
+                return 0;
+            }
+            store.rememberHash(byBatch.keySet(), outgoing.hash());
+            Exception lastError = null;
+            for (int attempt = 1; attempt <= 3; attempt++) {
+                try {
+                    chain.broadcast(outgoing);
+                    lastError = null;
+                    break;
+                } catch (Exception e) {
+                    lastError = e;
+                    if (attempt == 3) {
+                        break;
+                    }
+                    try {
+                        Thread.sleep(1000L * attempt);
+                    } catch (InterruptedException interrupted) {
+                        Thread.currentThread().interrupt();
+                        lastError = interrupted;
+                        break;
+                    }
+                }
+            }
+            if (lastError != null) {
+                LOG.log(Level.WARNING, "broadcast of " + transfers.size()
+                        + " transfers failed after 3 attempts, hash " + outgoing.hash() + " was stored", lastError);
+                return 0;
+            }
+            LOG.info("bus of " + transfers.size() + " transfers sent, hash " + outgoing.hash());
+            try {
+                for (Map.Entry<String, List<Long>> entry : byBatch.entrySet()) {
+                    notify(store.markSent(entry.getKey(), entry.getValue(), outgoing.hash()));
+                }
+            } catch (Exception e) {
+                LOG.log(Level.WARNING, "hash " + outgoing.hash()
+                        + " was broadcast but the sent status was not stored", e);
             }
         } catch (Exception e) {
             LOG.log(Level.WARNING, "bus of " + transfers.size() + " transfers failed", e);
@@ -238,10 +283,29 @@ public final class PayoutBatcher {
             }
         }
         if (!fresh.isEmpty()) {
-            webhook.insufficientBalance(fresh, need.toString(), balanceNano, Long.toString(config.feeReserveNano()));
+            webhook.insufficientBalance(fresh, need.toString(), balanceNano, networkFeeNano(live.size()).toString());
         }
         buffer.addAll(0, live);
         return config.pauseRetryMs();
+    }
+
+    private List<Item> withoutPoison(List<Item> live, List<Item> buffer) throws SQLException {
+        Map<String, List<Long>> poisoned = new LinkedHashMap<>();
+        List<Item> clean = new ArrayList<>(live.size());
+        for (Item item : live) {
+            if (TonAddress.isValid(item.transfer.to())) {
+                clean.add(item);
+            } else {
+                poisoned.computeIfAbsent(item.batchId, key -> new ArrayList<>()).add(item.id);
+            }
+        }
+        if (poisoned.isEmpty()) {
+            return clean;
+        }
+        clean.removeIf(item -> poisoned.containsKey(item.batchId));
+        LOG.warning(poisoned.size() + " batches dropped before broadcast because of an invalid destination");
+        fail(poisoned, buffer, "invalid destination");
+        return clean;
     }
 
     private void fail(Map<String, List<Long>> byBatch, List<Item> buffer, String message) throws SQLException {
@@ -253,11 +317,20 @@ public final class PayoutBatcher {
     }
 
     private BigInteger requiredNano(List<Transfer> transfers) {
-        BigInteger sum = BigInteger.valueOf(config.feeReserveNano());
+        BigInteger sum = networkFeeNano(transfers.size());
         for (Transfer transfer : transfers) {
             sum = sum.add(new BigInteger(transfer.amountNano()));
         }
         return sum;
+    }
+
+    private BigInteger networkFeeNano(int transfers) {
+        return networkFeeNano(config.feeReserveNano(), config.feePerTransferNano(), transfers);
+    }
+
+    public static BigInteger networkFeeNano(long baseNano, long perTransferNano, int transfers) {
+        return BigInteger.valueOf(baseNano)
+                .add(BigInteger.valueOf(perTransferNano).multiply(BigInteger.valueOf(transfers)));
     }
 
     private void notify(BatchOutcome outcome) {

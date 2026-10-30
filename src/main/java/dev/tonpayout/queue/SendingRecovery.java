@@ -4,10 +4,10 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.logging.Level;
 import java.util.logging.Logger;
 
 import dev.tonpayout.chain.BlockInclusion;
+import dev.tonpayout.chain.ChainLook;
 import dev.tonpayout.chain.MessageHashes;
 import dev.tonpayout.config.EngineConfig;
 import dev.tonpayout.notify.WebhookNotifier;
@@ -42,10 +42,14 @@ public final class SendingRecovery {
     }
 
     public synchronized List<BatchOutcome> sweep() throws Exception {
+        return sweep(new ChainLook(inclusion));
+    }
+
+    synchronized List<BatchOutcome> sweep(ChainLook look) throws Exception {
         long updatedBefore = System.currentTimeMillis() - config.sendingStaleMs();
         List<BatchOutcome> resolved = new ArrayList<>();
         for (StuckSending batch : store.staleSending(updatedBefore)) {
-            BatchOutcome outcome = resolve(batch);
+            BatchOutcome outcome = resolve(batch, look);
             if (outcome != null && outcome.terminal()) {
                 webhook.batchUpdated(outcome.batchId(), outcome.status(), outcome.count(), outcome.txHash(), outcome.error());
                 resolved.add(outcome);
@@ -54,22 +58,25 @@ public final class SendingRecovery {
         return resolved;
     }
 
-    private BatchOutcome resolve(StuckSending batch) throws Exception {
+    private BatchOutcome resolve(StuckSending batch, ChainLook look) throws Exception {
         long now = System.currentTimeMillis();
         if (retryAfter.getOrDefault(batch.batchId(), 0L) > now) {
             return null;
         }
         List<String> hashes = MessageHashes.split(batch.txHash());
         if (batch.sent() > 0 || hashes.isEmpty()) {
+            if (withinTtl(batch)) {
+                retryAfter.put(batch.batchId(), now + config.confirmDelayMs());
+                return null;
+            }
             String error = batch.sent() > 0 ? PARTIAL : NO_HASH;
             LOG.warning("batch " + batch.batchId() + " stuck in sending: " + error);
             return store.recoverFailed(batch.batchId(), error);
         }
         boolean included;
         try {
-            included = inclusion.allIncluded(hashes);
+            included = look.allIncluded(hashes);
         } catch (Exception e) {
-            LOG.log(Level.WARNING, "block lookup failed for stuck batch " + batch.batchId() + ": " + e.getMessage());
             retryAfter.put(batch.batchId(), now + 15_000);
             return null;
         }
@@ -77,7 +84,15 @@ public final class SendingRecovery {
             LOG.info("stuck batch " + batch.batchId() + " is in a block");
             return store.recoverConfirmed(batch.batchId());
         }
+        if (withinTtl(batch)) {
+            retryAfter.put(batch.batchId(), now + config.confirmDelayMs());
+            return null;
+        }
         LOG.warning("batch " + batch.batchId() + " stuck in sending: " + NOT_IN_BLOCK);
         return store.recoverFailed(batch.batchId(), NOT_IN_BLOCK);
+    }
+
+    private boolean withinTtl(StuckSending batch) {
+        return batch.updatedAt() > 0 && System.currentTimeMillis() < batch.updatedAt() + config.messageTtlMs();
     }
 }

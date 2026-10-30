@@ -5,6 +5,7 @@ import java.util.logging.Level;
 import java.util.logging.Logger;
 
 import dev.tonpayout.chain.BlockInclusion;
+import dev.tonpayout.chain.ChainLook;
 import dev.tonpayout.chain.MessageHashes;
 import dev.tonpayout.config.EngineConfig;
 import dev.tonpayout.notify.WebhookNotifier;
@@ -57,11 +58,7 @@ public final class TxPoller {
     private void loop() {
         while (running) {
             try {
-                long dueAt = System.currentTimeMillis() - config.confirmDelayMs();
-                for (SentBatch batch : store.sentBefore(dueAt)) {
-                    check(batch);
-                }
-                recovery.sweep();
+                confirmOnce();
                 Thread.sleep(Math.min(1000, config.confirmDelayMs()));
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
@@ -78,33 +75,43 @@ public final class TxPoller {
         }
     }
 
-    private void check(SentBatch batch) throws Exception {
+    void confirmOnce() throws Exception {
+        long dueAt = System.currentTimeMillis() - config.confirmDelayMs();
+        ChainLook look = new ChainLook(inclusion);
+        for (SentBatch batch : store.sentBefore(dueAt)) {
+            check(batch, look);
+        }
+        recovery.sweep(look);
+    }
+
+    private void check(SentBatch batch, ChainLook look) throws Exception {
         List<String> hashes = MessageHashes.split(batch.txHash());
-        if (hashes.isEmpty()) {
-            notify(store.markNotInBlock(batch.batchId(), "sent batch has no message hash"));
+        if (!hashes.isEmpty()) {
+            boolean included;
+            try {
+                included = look.allIncluded(hashes);
+            } catch (Exception e) {
+                store.delayConfirmation(batch.batchId());
+                return;
+            }
+            if (included) {
+                LOG.info("batch " + batch.batchId() + " is in a block");
+                notify(store.markConfirmed(batch.batchId()));
+                return;
+            }
+        }
+        long anchor = batch.sentAt() > 0 ? batch.sentAt() : batch.createdAt();
+        boolean expired = anchor <= 0 || System.currentTimeMillis() >= anchor + config.messageTtlMs();
+        if (!expired) {
+            store.noteConfirmationMiss(batch.batchId());
+            LOG.info("batch " + batch.batchId() + " is still outside a block; the highload message has not expired");
             return;
         }
-        boolean included;
-        try {
-            included = inclusion.allIncluded(hashes);
-        } catch (Exception e) {
-            LOG.log(Level.WARNING, "block lookup failed for " + batch.batchId() + ": " + e.getMessage());
-            store.delayConfirmation(batch.batchId());
-            return;
-        }
-        if (included) {
-            LOG.info("batch " + batch.batchId() + " is in a block");
-            notify(store.markConfirmed(batch.batchId()));
-            return;
-        }
-        int next = batch.checks() + 1;
-        if (next >= config.confirmAttempts()) {
-            LOG.info("batch " + batch.batchId() + " was not found in a block");
-            notify(store.markNotInBlock(batch.batchId(), "message was not included in a block"));
-            return;
-        }
-        store.noteConfirmationMiss(batch.batchId());
-        LOG.info("batch " + batch.batchId() + " is still outside a block, check " + next);
+        String error = hashes.isEmpty()
+                ? "highload message expired and no message hash was stored; check the wallet history before retrying"
+                : "message was not included in a block before the highload message expired";
+        LOG.info("batch " + batch.batchId() + " " + error);
+        notify(store.markNotInBlock(batch.batchId(), error));
     }
 
     private void notify(BatchOutcome outcome) {

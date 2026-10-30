@@ -23,7 +23,9 @@ public final class EngineConfig {
     private final String dbPath;
     private final long confirmDelayMs;
     private final int confirmAttempts;
+    private final long messageTtlMs;
     private final long feeReserveNano;
+    private final long feePerTransferNano;
     private final long pauseRetryMs;
     private final String alertUrl;
     private final long sendingStaleMs;
@@ -53,8 +55,13 @@ public final class EngineConfig {
                 "confirm.delayMs", 200, 120_000);
         confirmAttempts = parseInt(setting(properties, "confirm.attempts", "CONFIRM_ATTEMPTS", "4"),
                 "confirm.attempts", 1, 30);
+        messageTtlMs = parseLong(setting(properties, "message.ttlMs", "MESSAGE_TTL_MS", "960000"),
+                "message.ttlMs", 960_000, 86_400_000);
         feeReserveNano = parseLong(setting(properties, "wallet.feeReserveNano", "FEE_RESERVE_NANO", "50000000"),
                 "wallet.feeReserveNano", 0, 10_000_000_000L);
+        feePerTransferNano = parseLong(
+                setting(properties, "wallet.feePerTransferNano", "FEE_PER_TRANSFER_NANO", "8000000"),
+                "wallet.feePerTransferNano", 0, 10_000_000_000L);
         pauseRetryMs = parseLong(setting(properties, "pause.retryMs", "PAUSE_RETRY_MS", "15000"),
                 "pause.retryMs", 200, 600_000);
         alertUrl = setting(properties, "alert.url", "ALERT_URL", "");
@@ -128,7 +135,9 @@ public final class EngineConfig {
     public String dbPath() { return dbPath; }
     public long confirmDelayMs() { return confirmDelayMs; }
     public int confirmAttempts() { return confirmAttempts; }
+    public long messageTtlMs() { return messageTtlMs; }
     public long feeReserveNano() { return feeReserveNano; }
+    public long feePerTransferNano() { return feePerTransferNano; }
     public long pauseRetryMs() { return pauseRetryMs; }
     public String alertUrl() { return alertUrl; }
     public long sendingStaleMs() { return sendingStaleMs; }
