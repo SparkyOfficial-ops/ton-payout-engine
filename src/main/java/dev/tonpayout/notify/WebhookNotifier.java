@@ -36,14 +36,32 @@ public final class WebhookNotifier {
         body.put("count", count);
         body.put("txHash", txHash);
         body.put("error", error);
-        HttpRequest request = HttpRequest.newBuilder(URI.create(config.webhookUrl()))
+        post(config.webhookUrl(), body, batchId);
+    }
+
+    public void insufficientBalance(java.util.List<String> batchIds, String needNano, String balanceNano, String feeNano) {
+        LOG.warning("paused payout, need " + needNano + " nano, balance " + balanceNano + " nano, batches " + batchIds);
+        if (config.alertUrl().isBlank()) {
+            return;
+        }
+        Map<String, Object> body = new LinkedHashMap<>();
+        body.put("type", "insufficient_balance");
+        body.put("batchIds", batchIds);
+        body.put("needNano", needNano);
+        body.put("balanceNano", balanceNano);
+        body.put("feeReserveNano", feeNano);
+        post(config.alertUrl(), body, "balance");
+    }
+
+    private void post(String url, Map<String, Object> body, String label) {
+        HttpRequest request = HttpRequest.newBuilder(URI.create(url))
                 .timeout(Duration.ofMillis(config.webhookTimeoutMs()))
                 .header("Content-Type", "application/json")
                 .POST(HttpRequest.BodyPublishers.ofString(Json.stringify(body)))
                 .build();
         client.sendAsync(request, HttpResponse.BodyHandlers.discarding())
                 .exceptionally(ex -> {
-                    LOG.log(Level.WARNING, "webhook failed for " + batchId + ": " + ex.getMessage());
+                    LOG.log(Level.WARNING, "webhook failed for " + label + ": " + ex.getMessage());
                     return null;
                 });
     }

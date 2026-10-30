@@ -10,15 +10,19 @@ import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.List;
 import java.util.Map;
+import java.util.logging.Logger;
 
 import dev.tonpayout.config.EngineConfig;
 import dev.tonpayout.json.Json;
 
 /**
- * Looks up the wallet's recent transactions in TON Center and matches the
- * external-message hash returned by sendBoc. A match means the message is in a block.
+ * Looks up the wallet's recent transactions in TON Center.
+ * A batch is included only when sendBoc's message hash equals {@code in_msg.hash}
+ * or, on nodes that omit that field, {@code in_msg.body_hash}.
  */
 public final class TonCenterBlockInclusion implements BlockInclusion {
+    private static final Logger LOG = Logger.getLogger(TonCenterBlockInclusion.class.getName());
+
     private final EngineConfig config;
     private final HttpClient client;
 
@@ -50,15 +54,94 @@ public final class TonCenterBlockInclusion implements BlockInclusion {
         if (response.statusCode() / 100 != 2) {
             throw new IOException("getTransactions HTTP " + response.statusCode());
         }
-        Map<String, Object> body = Json.asObject(Json.parse(response.body()));
+        String raw = response.body();
+        Map<String, Object> body = Json.asObject(Json.parse(raw));
         if (Boolean.FALSE.equals(body.get("ok"))) {
             throw new IOException("getTransactions rejected the request");
         }
+        Object result = body.get("result");
+        if (!(result instanceof List<?> transactions)) {
+            throw new IOException("getTransactions result is not a list");
+        }
+        LOG.info("toncenter first transaction json: " + firstResultObject(raw));
         for (String hash : messageHashes) {
-            if (!MessageHashes.contains(body.get("result"), hash)) {
+            if (match(transactions, hash) == null) {
                 return false;
             }
         }
         return true;
+    }
+
+    private static String match(List<?> transactions, String expected) {
+        LOG.info("confirm seek sendBoc hash '" + expected + "'");
+        String found = null;
+        int index = 0;
+        for (Object transaction : transactions) {
+            String hash = MessageHashes.fieldText(transaction, "hash");
+            String bodyHash = MessageHashes.fieldText(transaction, "body_hash");
+            String field = MessageHashes.inMessageField(transaction, expected);
+            LOG.info("toncenter tx[" + index + "] in_msg.hash='" + hash + "' in_msg.body_hash='" + bodyHash + "'"
+                    + (field == null ? "" : " matched " + field));
+            if (field != null && found == null) {
+                found = field;
+            }
+            index++;
+        }
+        if (transactions.isEmpty()) {
+            LOG.info("toncenter getTransactions returned no transactions");
+        }
+        return found;
+    }
+
+    /** First object of the {@code result} array, copied from the Toncenter body without rewriting. */
+    static String firstResultObject(String json) {
+        if (json == null) {
+            return "";
+        }
+        int key = json.indexOf("\"result\"");
+        if (key < 0) {
+            return "";
+        }
+        int array = json.indexOf('[', key);
+        if (array < 0) {
+            return "";
+        }
+        int start = array + 1;
+        while (start < json.length() && Character.isWhitespace(json.charAt(start))) {
+            start++;
+        }
+        if (start >= json.length() || json.charAt(start) == ']') {
+            return "";
+        }
+        if (json.charAt(start) != '{') {
+            return json.substring(start, Math.min(json.length(), start + 500));
+        }
+        int depth = 0;
+        boolean inString = false;
+        boolean escape = false;
+        for (int i = start; i < json.length(); i++) {
+            char c = json.charAt(i);
+            if (inString) {
+                if (escape) {
+                    escape = false;
+                } else if (c == '\\') {
+                    escape = true;
+                } else if (c == '"') {
+                    inString = false;
+                }
+                continue;
+            }
+            if (c == '"') {
+                inString = true;
+            } else if (c == '{') {
+                depth++;
+            } else if (c == '}') {
+                depth--;
+                if (depth == 0) {
+                    return json.substring(start, i + 1);
+                }
+            }
+        }
+        return json.substring(start);
     }
 }

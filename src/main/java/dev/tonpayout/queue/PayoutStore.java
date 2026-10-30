@@ -138,7 +138,7 @@ public final class PayoutStore implements AutoCloseable {
                 SELECT t.id, t.batch_id, t.destination, t.amount_nano, t.comment
                 FROM transfers t
                 JOIN batches b ON b.id = t.batch_id
-                WHERE t.status = 'queued' AND b.status IN ('queued', 'sending')
+                WHERE t.status = 'queued' AND b.status IN ('queued', 'sending', 'paused')
                 ORDER BY t.id
                 """;
         List<QueuedTransfer> rows = new ArrayList<>();
@@ -188,6 +188,34 @@ public final class PayoutStore implements AutoCloseable {
                 return result.next() && "failed".equals(result.getString(1));
             }
         }
+    }
+
+    /**
+     * @return true when the batch moves into pause, false when it was already paused or is finished
+     */
+    public synchronized boolean markPaused(String batchId, String error) throws SQLException {
+        String status;
+        try (PreparedStatement statement = connection.prepareStatement(
+                "SELECT status FROM batches WHERE id = ?")) {
+            statement.setString(1, batchId);
+            try (ResultSet result = statement.executeQuery()) {
+                if (!result.next()) {
+                    return false;
+                }
+                status = result.getString(1);
+            }
+        }
+        if ("failed".equals(status) || "sent".equals(status) || "confirmed".equals(status)) {
+            return false;
+        }
+        try (PreparedStatement statement = connection.prepareStatement(
+                "UPDATE batches SET status = 'paused', error = ?, updated_at = ? WHERE id = ?")) {
+            statement.setString(1, error);
+            statement.setLong(2, System.currentTimeMillis());
+            statement.setString(3, batchId);
+            statement.executeUpdate();
+        }
+        return !"paused".equals(status);
     }
 
     public synchronized void markSending(List<Long> transferIds) throws SQLException {
@@ -289,6 +317,100 @@ public final class PayoutStore implements AutoCloseable {
             }
         }
         return rows;
+    }
+
+    public synchronized List<StuckSending> staleSending(long updatedBefore) throws SQLException {
+        List<StuckSending> rows = new ArrayList<>();
+        try (PreparedStatement statement = connection.prepareStatement(
+                "SELECT id, total, tx_hash FROM batches WHERE status = 'sending' AND updated_at <= ?")) {
+            statement.setLong(1, updatedBefore);
+            try (ResultSet result = statement.executeQuery()) {
+                while (result.next()) {
+                    String batchId = result.getString(1);
+                    int[] counts = transferCounts(batchId);
+                    if (counts[0] == 0 || counts[2] > 0) {
+                        continue;
+                    }
+                    rows.add(new StuckSending(batchId, result.getInt(2), result.getString(3), counts[0], counts[1]));
+                }
+            }
+        }
+        return rows;
+    }
+
+    public synchronized BatchOutcome recoverConfirmed(String batchId) throws SQLException {
+        connection.setAutoCommit(false);
+        try {
+            int changed;
+            try (PreparedStatement batch = connection.prepareStatement(
+                    "UPDATE batches SET status = 'confirmed', updated_at = ? WHERE id = ? AND status = 'sending'")) {
+                batch.setLong(1, System.currentTimeMillis());
+                batch.setString(2, batchId);
+                changed = batch.executeUpdate();
+            }
+            try (PreparedStatement transfers = connection.prepareStatement(
+                    "UPDATE transfers SET status = 'confirmed' WHERE batch_id = ? AND status = 'sending'")) {
+                transfers.setString(1, batchId);
+                transfers.executeUpdate();
+            }
+            connection.commit();
+            return outcome(batchId, changed > 0);
+        } catch (SQLException e) {
+            connection.rollback();
+            throw e;
+        } finally {
+            connection.setAutoCommit(true);
+        }
+    }
+
+    public synchronized BatchOutcome recoverFailed(String batchId, String error) throws SQLException {
+        connection.setAutoCommit(false);
+        try {
+            int changed;
+            try (PreparedStatement batch = connection.prepareStatement(
+                    "UPDATE batches SET status = 'failed', error = ?, updated_at = ? WHERE id = ? AND status = 'sending'")) {
+                batch.setString(1, error);
+                batch.setLong(2, System.currentTimeMillis());
+                batch.setString(3, batchId);
+                changed = batch.executeUpdate();
+            }
+            try (PreparedStatement transfers = connection.prepareStatement(
+                    "UPDATE transfers SET status = 'failed' WHERE batch_id = ? AND status = 'sending'")) {
+                transfers.setString(1, batchId);
+                transfers.executeUpdate();
+            }
+            connection.commit();
+            return outcome(batchId, changed > 0);
+        } catch (SQLException e) {
+            connection.rollback();
+            throw e;
+        } finally {
+            connection.setAutoCommit(true);
+        }
+    }
+
+    private int[] transferCounts(String batchId) throws SQLException {
+        int sending = 0;
+        int sent = 0;
+        int queued = 0;
+        try (PreparedStatement statement = connection.prepareStatement(
+                "SELECT status, COUNT(*) FROM transfers WHERE batch_id = ? GROUP BY status")) {
+            statement.setString(1, batchId);
+            try (ResultSet result = statement.executeQuery()) {
+                while (result.next()) {
+                    String status = result.getString(1);
+                    int count = result.getInt(2);
+                    if ("sending".equals(status)) {
+                        sending = count;
+                    } else if ("sent".equals(status)) {
+                        sent = count;
+                    } else if ("queued".equals(status)) {
+                        queued = count;
+                    }
+                }
+            }
+        }
+        return new int[] {sending, sent, queued};
     }
 
     public synchronized BatchOutcome markConfirmed(String batchId) throws SQLException {
@@ -468,6 +590,9 @@ public final class PayoutStore implements AutoCloseable {
     }
 
     public record SentBatch(String batchId, int count, String txHash, int checks) {
+    }
+
+    public record StuckSending(String batchId, int count, String txHash, int sending, int sent) {
     }
 
     public record IdempotentHit(Map<String, Object> status, String requestHash) {

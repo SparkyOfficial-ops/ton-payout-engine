@@ -49,10 +49,14 @@ java -jar target/ton-payout-engine-0.1.0-SNAPSHOT.jar
 {"batchId":"...","status":"confirmed","count":3,"txHash":"...","error":null}
 ```
 
-`GET /api/v1/status/{batchId}` показывает `queued`, `sending`, `sent`, `confirmed` или `failed`.
+`GET /api/v1/status/{batchId}` показывает `queued`, `sending`, `paused`, `sent`, `confirmed` или `failed`.
+
+Перед отправкой движок сравнивает баланс кошелька с суммой переводов плюс `FEE_RESERVE_NANO` (по умолчанию 0.05 TON). Если денег меньше, пачка становится `paused`, в сеть ничего не уходит, и на `ALERT_URL` отправляется алерт. Проверка повторяется через `PAUSE_RETRY_MS`.
+
+Если пачка осталась в `sending` дольше `SENDING_STALE_MS` (5 минут) и в ней не осталось `queued` переводов, движок её не переотправляет. Хэш, который уже лежит в блоке, переводит пачку в `confirmed`. Хэш, которого в блоке нет, переводит её в `failed`, и бот повторяет выплату новым `X-Idempotency-Key`. Если хэш так и не записался, пачка тоже становится `failed`, но перед повтором нужно сверить историю кошелька: сообщение могло успеть попасть в блок. `POST /api/v1/recovery` запускает ту же проверку и не трогает `sending` младше пяти минут.
 
 `GET /api/v1/balance`
 
 `GET /health` без ключа.
 
-Нужны `WALLET_ADDRESS` и файл ключа (`WALLET_KEY_PATH`: 32 байта, 64 hex-символа, base64 или мнемоника). Без них пачка получает статус `failed` и в сеть не уходит. `txHash` — это hash внешнего сообщения из ответа TON Center `sendBoc`. Подтверждение ищет тот же hash в `in_msg` последних транзакций кошелька.
+Нужны `WALLET_ADDRESS` и файл ключа (`WALLET_KEY_PATH`: 32 байта, 64 hex-символа, base64 или мнемоника). Без них пачка получает статус `failed` и в сеть не уходит. `txHash` — это hash внешнего сообщения из ответа TON Center `sendBoc`. Подтверждение сравнивает его только с `in_msg.hash` или `in_msg.body_hash`. `transaction_id.hash` — это хэш самой транзакции, он не используется. В лог пишется сырой JSON первой транзакции из `getTransactions` и обе строки `in_msg`, чтобы их можно было сверить с хэшем `cton-sdk` посимвольно.

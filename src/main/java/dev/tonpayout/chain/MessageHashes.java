@@ -4,6 +4,10 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 
+/**
+ * Compares a sendBoc message hash with Toncenter {@code in_msg.hash} or {@code in_msg.body_hash}.
+ * {@code transaction_id.hash} is a different value and is never consulted.
+ */
 public final class MessageHashes {
     private MessageHashes() {
     }
@@ -21,12 +25,36 @@ public final class MessageHashes {
         return hashes;
     }
 
-    public static boolean contains(Object node, String expected) {
-        String needle = normalize(expected);
-        if (needle.isEmpty()) {
-            return false;
+    /**
+     * @return {@code hash} or {@code body_hash} when that {@code in_msg} field matches, otherwise null
+     */
+    public static String inMessageField(Object transaction, String expected) {
+        if (!(transaction instanceof Map<?, ?> tx)) {
+            return null;
         }
-        return walk(node, needle);
+        Object inMsg = tx.get("in_msg");
+        if (!(inMsg instanceof Map<?, ?> message)) {
+            return null;
+        }
+        if (same(message.get("hash"), expected)) {
+            return "hash";
+        }
+        if (same(message.get("body_hash"), expected)) {
+            return "body_hash";
+        }
+        return null;
+    }
+
+    public static String fieldText(Object transaction, String field) {
+        if (!(transaction instanceof Map<?, ?> tx)) {
+            return null;
+        }
+        Object inMsg = tx.get("in_msg");
+        if (!(inMsg instanceof Map<?, ?> message)) {
+            return null;
+        }
+        Object value = message.get(field);
+        return value == null ? null : String.valueOf(value);
     }
 
     public static String normalize(String hash) {
@@ -41,26 +69,11 @@ public final class MessageHashes {
         return value.substring(0, end);
     }
 
-    private static boolean walk(Object node, String needle) {
-        if (node instanceof Map<?, ?> map) {
-            Object hash = map.get("hash");
-            if (hash != null && needle.equals(normalize(String.valueOf(hash)))) {
-                return true;
-            }
-            for (Object value : map.values()) {
-                if (walk(value, needle)) {
-                    return true;
-                }
-            }
+    private static boolean same(Object actual, String expected) {
+        if (actual == null) {
             return false;
         }
-        if (node instanceof Iterable<?> list) {
-            for (Object value : list) {
-                if (walk(value, needle)) {
-                    return true;
-                }
-            }
-        }
-        return false;
+        String needle = normalize(expected);
+        return !needle.isEmpty() && needle.equals(normalize(String.valueOf(actual)));
     }
 }

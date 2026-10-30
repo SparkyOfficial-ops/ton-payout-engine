@@ -1,5 +1,6 @@
 package dev.tonpayout.queue;
 
+import java.math.BigInteger;
 import java.sql.SQLException;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
@@ -113,7 +114,8 @@ public final class PayoutBatcher {
         int sending = store.countSending();
         LOG.info("loaded " + pending.size() + " queued transfers from " + config.dbPath());
         if (sending > 0) {
-            LOG.warning(sending + " transfers are sending from a previous run and will not be broadcast again");
+            LOG.warning(sending + " transfers are sending from a previous run and will not be broadcast again; "
+                    + "after " + config.sendingStaleMs() + " ms they are confirmed from the chain or marked failed");
         }
         running = true;
         worker = new Thread(this::loop, "payout-batcher");
@@ -154,7 +156,10 @@ public final class PayoutBatcher {
                     if (!buffer.isEmpty()) {
                         flushAt = System.currentTimeMillis() + config.batchWindowMs();
                     }
-                    dispatch(chunk, buffer);
+                    long pauseMs = dispatch(chunk, buffer);
+                    if (pauseMs > 0) {
+                        flushAt = System.currentTimeMillis() + pauseMs;
+                    }
                 }
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
@@ -165,7 +170,7 @@ public final class PayoutBatcher {
         }
     }
 
-    private void dispatch(List<Item> chunk, List<Item> buffer) throws SQLException {
+    private long dispatch(List<Item> chunk, List<Item> buffer) throws SQLException {
         List<Item> live = new ArrayList<>(chunk.size());
         for (Item item : chunk) {
             if (store.isFailed(item.batchId)) {
@@ -174,7 +179,7 @@ public final class PayoutBatcher {
             live.add(item);
         }
         if (live.isEmpty()) {
-            return;
+            return 0;
         }
 
         List<Long> ids = new ArrayList<>(live.size());
@@ -186,11 +191,29 @@ public final class PayoutBatcher {
             byBatch.computeIfAbsent(item.batchId, key -> new ArrayList<>()).add(item.id);
         }
 
+        if (!chain.isReady()) {
+            fail(byBatch, buffer, "wallet address or key file is not set");
+            return 0;
+        }
+        BigInteger need = requiredNano(transfers);
+        try {
+            String rawBalance = chain.balanceNano();
+            if (rawBalance == null || rawBalance.isBlank()) {
+                return hold(live, buffer, byBatch, need, "unknown", "wallet balance is unknown");
+            }
+            BigInteger have = new BigInteger(rawBalance);
+            if (have.compareTo(need) < 0) {
+                return hold(live, buffer, byBatch, need, have.toString(),
+                        "insufficient balance: need " + need + " nano, have " + have + " nano");
+            }
+        } catch (Exception e) {
+            LOG.log(Level.WARNING, "balance check failed", e);
+            String message = e.getMessage() == null ? e.getClass().getSimpleName() : e.getMessage();
+            return hold(live, buffer, byBatch, need, "unknown", "balance check failed: " + message);
+        }
+
         try {
             store.markSending(ids);
-            if (!chain.isReady()) {
-                throw new IllegalStateException("wallet address or key file is not set");
-            }
             String txHash = chain.send(transfers);
             LOG.info("bus of " + transfers.size() + " transfers sent, hash " + txHash);
             for (Map.Entry<String, List<Long>> entry : byBatch.entrySet()) {
@@ -199,12 +222,42 @@ public final class PayoutBatcher {
         } catch (Exception e) {
             LOG.log(Level.WARNING, "bus of " + transfers.size() + " transfers failed", e);
             String message = e.getMessage() == null ? e.getClass().getSimpleName() : e.getMessage();
-            for (String batchId : byBatch.keySet()) {
-                buffer.removeIf(item -> batchId.equals(item.batchId));
-                queue.removeIf(item -> batchId.equals(item.batchId));
-                notify(store.markFailed(batchId, message));
+            fail(byBatch, buffer, message);
+        }
+        return 0;
+    }
+
+    private long hold(List<Item> live, List<Item> buffer, Map<String, List<Long>> byBatch,
+            BigInteger need, String balanceNano, String message) throws SQLException {
+        List<String> fresh = new ArrayList<>();
+        for (String batchId : byBatch.keySet()) {
+            if (store.markPaused(batchId, message)) {
+                fresh.add(batchId);
+                Map<String, Object> status = store.batchStatus(batchId);
+                webhook.batchUpdated(batchId, "paused", (Integer) status.get("count"), null, message);
             }
         }
+        if (!fresh.isEmpty()) {
+            webhook.insufficientBalance(fresh, need.toString(), balanceNano, Long.toString(config.feeReserveNano()));
+        }
+        buffer.addAll(0, live);
+        return config.pauseRetryMs();
+    }
+
+    private void fail(Map<String, List<Long>> byBatch, List<Item> buffer, String message) throws SQLException {
+        for (String batchId : byBatch.keySet()) {
+            buffer.removeIf(item -> batchId.equals(item.batchId));
+            queue.removeIf(item -> batchId.equals(item.batchId));
+            notify(store.markFailed(batchId, message));
+        }
+    }
+
+    private BigInteger requiredNano(List<Transfer> transfers) {
+        BigInteger sum = BigInteger.valueOf(config.feeReserveNano());
+        for (Transfer transfer : transfers) {
+            sum = sum.add(new BigInteger(transfer.amountNano()));
+        }
+        return sum;
     }
 
     private void notify(BatchOutcome outcome) {

@@ -22,14 +22,17 @@ public final class TxPoller {
     private final PayoutStore store;
     private final WebhookNotifier webhook;
     private final BlockInclusion inclusion;
+    private final SendingRecovery recovery;
     private volatile boolean running;
     private Thread worker;
 
-    public TxPoller(EngineConfig config, PayoutStore store, WebhookNotifier webhook, BlockInclusion inclusion) {
+    public TxPoller(EngineConfig config, PayoutStore store, WebhookNotifier webhook, BlockInclusion inclusion,
+            SendingRecovery recovery) {
         this.config = config;
         this.store = store;
         this.webhook = webhook;
         this.inclusion = inclusion;
+        this.recovery = recovery;
     }
 
     public void start() {
@@ -58,6 +61,7 @@ public final class TxPoller {
                 for (SentBatch batch : store.sentBefore(dueAt)) {
                     check(batch);
                 }
+                recovery.sweep();
                 Thread.sleep(Math.min(1000, config.confirmDelayMs()));
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();

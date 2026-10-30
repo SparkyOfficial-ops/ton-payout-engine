@@ -23,6 +23,10 @@ public final class EngineConfig {
     private final String dbPath;
     private final long confirmDelayMs;
     private final int confirmAttempts;
+    private final long feeReserveNano;
+    private final long pauseRetryMs;
+    private final String alertUrl;
+    private final long sendingStaleMs;
 
     private EngineConfig(Properties properties) {
         httpHost = setting(properties, "http.host", "PAYOUT_HTTP_HOST", "0.0.0.0");
@@ -47,6 +51,13 @@ public final class EngineConfig {
                 "confirm.delayMs", 200, 120_000);
         confirmAttempts = parseInt(setting(properties, "confirm.attempts", "CONFIRM_ATTEMPTS", "4"),
                 "confirm.attempts", 1, 30);
+        feeReserveNano = parseLong(setting(properties, "wallet.feeReserveNano", "FEE_RESERVE_NANO", "50000000"),
+                "wallet.feeReserveNano", 0, 10_000_000_000L);
+        pauseRetryMs = parseLong(setting(properties, "pause.retryMs", "PAUSE_RETRY_MS", "15000"),
+                "pause.retryMs", 200, 600_000);
+        alertUrl = setting(properties, "alert.url", "ALERT_URL", "");
+        sendingStaleMs = parseLong(setting(properties, "sending.staleMs", "SENDING_STALE_MS", "300000"),
+                "sending.staleMs", 1_000, 86_400_000);
     }
 
     public static EngineConfig load() throws IOException {
@@ -109,4 +120,8 @@ public final class EngineConfig {
     public String dbPath() { return dbPath; }
     public long confirmDelayMs() { return confirmDelayMs; }
     public int confirmAttempts() { return confirmAttempts; }
+    public long feeReserveNano() { return feeReserveNano; }
+    public long pauseRetryMs() { return pauseRetryMs; }
+    public String alertUrl() { return alertUrl; }
+    public long sendingStaleMs() { return sendingStaleMs; }
 }

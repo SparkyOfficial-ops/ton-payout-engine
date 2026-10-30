@@ -21,6 +21,8 @@ import dev.tonpayout.chain.ChainSender;
 import dev.tonpayout.config.EngineConfig;
 import dev.tonpayout.json.Json;
 import dev.tonpayout.queue.PayoutBatcher;
+import dev.tonpayout.queue.PayoutStore.BatchOutcome;
+import dev.tonpayout.queue.SendingRecovery;
 import dev.tonpayout.queue.Transfer;
 
 public final class ApiServer {
@@ -31,12 +33,14 @@ public final class ApiServer {
     private final EngineConfig config;
     private final PayoutBatcher batcher;
     private final ChainSender chain;
+    private final SendingRecovery recovery;
     private HttpServer server;
 
-    public ApiServer(EngineConfig config, PayoutBatcher batcher, ChainSender chain) {
+    public ApiServer(EngineConfig config, PayoutBatcher batcher, ChainSender chain, SendingRecovery recovery) {
         this.config = config;
         this.batcher = batcher;
         this.chain = chain;
+        this.recovery = recovery;
     }
 
     public void start() throws IOException {
@@ -45,6 +49,7 @@ public final class ApiServer {
         server.createContext("/api/v1/payout", this::payout);
         server.createContext("/api/v1/status", this::status);
         server.createContext("/api/v1/balance", this::balance);
+        server.createContext("/api/v1/recovery", this::recovery);
         server.start();
         LOG.info("http " + config.httpHost() + ":" + config.httpPort()
                 + " wallet=" + (config.walletAddress().isBlank() ? "unset" : config.walletAddress())
@@ -150,6 +155,33 @@ public final class ApiServer {
             body.put("balanceNano", null);
             body.put("error", e.getMessage());
             send(exchange, 502, body);
+        }
+    }
+
+    private void recovery(HttpExchange exchange) throws IOException {
+        if (!authorized(exchange)) {
+            return;
+        }
+        if (!"POST".equals(exchange.getRequestMethod())) {
+            send(exchange, 405, error("method not allowed"));
+            return;
+        }
+        try {
+            List<Map<String, Object>> resolved = new ArrayList<>();
+            for (BatchOutcome outcome : recovery.sweep()) {
+                Map<String, Object> row = new LinkedHashMap<>();
+                row.put("batchId", outcome.batchId());
+                row.put("status", outcome.status());
+                row.put("txHash", outcome.txHash());
+                row.put("error", outcome.error());
+                resolved.add(row);
+            }
+            Map<String, Object> body = new LinkedHashMap<>();
+            body.put("resolved", resolved);
+            send(exchange, 200, body);
+        } catch (Exception e) {
+            LOG.log(Level.SEVERE, "sending recovery failed", e);
+            send(exchange, 500, error("sending recovery failed"));
         }
     }
 

@@ -11,6 +11,7 @@ import dev.tonpayout.config.EngineConfig;
 import dev.tonpayout.notify.WebhookNotifier;
 import dev.tonpayout.queue.PayoutBatcher;
 import dev.tonpayout.queue.PayoutStore;
+import dev.tonpayout.queue.SendingRecovery;
 import dev.tonpayout.queue.TxPoller;
 
 public final class PayoutEngine {
@@ -25,8 +26,10 @@ public final class PayoutEngine {
         WebhookNotifier webhook = new WebhookNotifier(config);
         PayoutStore store = new PayoutStore(Path.of(config.dbPath()));
         PayoutBatcher batcher = new PayoutBatcher(config, chain, webhook, store);
-        TxPoller poller = new TxPoller(config, store, webhook, new TonCenterBlockInclusion(config));
-        ApiServer api = new ApiServer(config, batcher, chain);
+        TonCenterBlockInclusion inclusion = new TonCenterBlockInclusion(config);
+        SendingRecovery recovery = new SendingRecovery(config, store, webhook, inclusion);
+        TxPoller poller = new TxPoller(config, store, webhook, inclusion, recovery);
+        ApiServer api = new ApiServer(config, batcher, chain, recovery);
         batcher.start();
         poller.start();
         api.start();
