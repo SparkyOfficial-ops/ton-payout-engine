@@ -56,18 +56,28 @@ public final class PayoutStore implements AutoCloseable {
             statement.execute("CREATE INDEX IF NOT EXISTS idx_transfers_status ON transfers(status)");
         }
         addColumn("confirm_checks", "INTEGER NOT NULL DEFAULT 0");
+        addColumn("idempotency_key", "TEXT");
+        addColumn("request_hash", "TEXT");
+        try (Statement statement = connection.createStatement()) {
+            statement.execute(
+                    "CREATE UNIQUE INDEX IF NOT EXISTS idx_batches_idempotency ON batches(idempotency_key)");
+        }
     }
 
-    public synchronized List<QueuedTransfer> insertQueued(String batchId, List<Transfer> transfers) throws SQLException {
+    public synchronized List<QueuedTransfer> insertQueued(String batchId, String idempotencyKey,
+            String requestHash, List<Transfer> transfers) throws SQLException {
         long now = System.currentTimeMillis();
         connection.setAutoCommit(false);
         try {
             try (PreparedStatement batch = connection.prepareStatement(
-                    "INSERT INTO batches(id, status, total, created_at, updated_at) VALUES (?, 'queued', ?, ?, ?)")) {
+                    "INSERT INTO batches(id, status, total, tx_hash, error, created_at, updated_at, idempotency_key, request_hash) "
+                            + "VALUES (?, 'queued', ?, NULL, NULL, ?, ?, ?, ?)")) {
                 batch.setString(1, batchId);
                 batch.setInt(2, transfers.size());
                 batch.setLong(3, now);
                 batch.setLong(4, now);
+                batch.setString(5, idempotencyKey);
+                batch.setString(6, requestHash);
                 batch.executeUpdate();
             }
             List<QueuedTransfer> stored = new ArrayList<>(transfers.size());
@@ -92,10 +102,35 @@ public final class PayoutStore implements AutoCloseable {
             return stored;
         } catch (SQLException e) {
             connection.rollback();
+            if (isIdempotencyConstraint(e)) {
+                throw new DuplicateIdempotencyKey();
+            }
             throw e;
         } finally {
             connection.setAutoCommit(true);
         }
+    }
+
+    public synchronized IdempotentHit findIdempotent(String idempotencyKey) throws SQLException {
+        String batchId;
+        String requestHash;
+        try (PreparedStatement statement = connection.prepareStatement(
+                "SELECT id, request_hash FROM batches WHERE idempotency_key = ?")) {
+            statement.setString(1, idempotencyKey);
+            try (ResultSet result = statement.executeQuery()) {
+                if (!result.next()) {
+                    return null;
+                }
+                batchId = result.getString(1);
+                requestHash = result.getString(2);
+            }
+        }
+        return new IdempotentHit(batchStatus(batchId), requestHash);
+    }
+
+    private static boolean isIdempotencyConstraint(SQLException error) {
+        String message = error.getMessage() == null ? "" : error.getMessage().toLowerCase();
+        return error.getErrorCode() == 19 && message.contains("idempotency");
     }
 
     public synchronized List<QueuedTransfer> loadQueued() throws SQLException {
@@ -433,5 +468,14 @@ public final class PayoutStore implements AutoCloseable {
     }
 
     public record SentBatch(String batchId, int count, String txHash, int checks) {
+    }
+
+    public record IdempotentHit(Map<String, Object> status, String requestHash) {
+    }
+
+    public static final class DuplicateIdempotencyKey extends SQLException {
+        public DuplicateIdempotencyKey() {
+            super("idempotency key already exists");
+        }
     }
 }

@@ -1,7 +1,10 @@
 package dev.tonpayout.queue;
 
 import java.sql.SQLException;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.util.ArrayList;
+import java.util.HexFormat;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -16,6 +19,8 @@ import dev.tonpayout.chain.ChainSender;
 import dev.tonpayout.config.EngineConfig;
 import dev.tonpayout.notify.WebhookNotifier;
 import dev.tonpayout.queue.PayoutStore.BatchOutcome;
+import dev.tonpayout.queue.PayoutStore.DuplicateIdempotencyKey;
+import dev.tonpayout.queue.PayoutStore.IdempotentHit;
 import dev.tonpayout.queue.PayoutStore.QueuedTransfer;
 
 public final class PayoutBatcher {
@@ -36,13 +41,64 @@ public final class PayoutBatcher {
         this.store = store;
     }
 
-    public String enqueue(List<Transfer> transfers) throws SQLException {
+    public AcceptResult enqueue(String idempotencyKey, List<Transfer> transfers) throws SQLException {
+        String requestHash = fingerprint(transfers);
+        IdempotentHit existing = store.findIdempotent(idempotencyKey);
+        if (existing != null) {
+            return replay(existing, requestHash);
+        }
         String batchId = UUID.randomUUID().toString();
-        List<QueuedTransfer> stored = store.insertQueued(batchId, transfers);
+        List<QueuedTransfer> stored;
+        try {
+            stored = store.insertQueued(batchId, idempotencyKey, requestHash, transfers);
+        } catch (DuplicateIdempotencyKey e) {
+            existing = store.findIdempotent(idempotencyKey);
+            if (existing == null) {
+                throw e;
+            }
+            return replay(existing, requestHash);
+        }
         for (QueuedTransfer row : stored) {
             queue.add(new Item(row.id(), row.batchId(), row.transfer()));
         }
-        return batchId;
+        Map<String, Object> body = new LinkedHashMap<>();
+        body.put("batchId", batchId);
+        body.put("status", "queued");
+        body.put("count", transfers.size());
+        body.put("txHash", null);
+        body.put("error", null);
+        return new AcceptResult(body, true);
+    }
+
+    private static AcceptResult replay(IdempotentHit existing, String requestHash) {
+        if (existing.requestHash() != null && !existing.requestHash().equals(requestHash)) {
+            throw new IdempotencyConflict("X-Idempotency-Key was already used with a different body");
+        }
+        return new AcceptResult(existing.status(), false);
+    }
+
+    private static String fingerprint(List<Transfer> transfers) {
+        StringBuilder canonical = new StringBuilder();
+        for (Transfer transfer : transfers) {
+            canonical.append(transfer.to()).append('\n')
+                    .append(transfer.amountNano()).append('\n')
+                    .append(transfer.comment() == null ? "" : transfer.comment()).append('\n');
+        }
+        try {
+            byte[] digest = MessageDigest.getInstance("SHA-256").digest(canonical.toString().getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            return HexFormat.of().formatHex(digest);
+        } catch (NoSuchAlgorithmException e) {
+            throw new IllegalStateException(e);
+        }
+    }
+
+    public record AcceptResult(Map<String, Object> status, boolean created) {
+    }
+
+    public static final class IdempotencyConflict extends IllegalStateException {
+        public IdempotencyConflict(String message) {
+            super(message);
+        }
     }
 
     public Map<String, Object> status(String batchId) throws SQLException {

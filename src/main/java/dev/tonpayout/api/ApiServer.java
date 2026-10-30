@@ -75,6 +75,16 @@ public final class ApiServer {
             send(exchange, 405, error("method not allowed"));
             return;
         }
+        String key = exchange.getRequestHeaders().getFirst("X-Idempotency-Key");
+        if (key == null || key.isBlank()) {
+            send(exchange, 400, error("X-Idempotency-Key is required"));
+            return;
+        }
+        key = key.trim();
+        if (key.length() > 200) {
+            send(exchange, 400, error("X-Idempotency-Key is too long"));
+            return;
+        }
         String raw = readBody(exchange);
         if (raw == null) {
             send(exchange, 413, error("body is too large"));
@@ -82,14 +92,12 @@ public final class ApiServer {
         }
         try {
             List<Transfer> transfers = parseTransfers(raw);
-            String batchId = batcher.enqueue(transfers);
-            Map<String, Object> body = new LinkedHashMap<>();
-            body.put("batchId", batchId);
-            body.put("status", "queued");
-            body.put("count", transfers.size());
-            send(exchange, 202, body);
+            PayoutBatcher.AcceptResult accepted = batcher.enqueue(key, transfers);
+            send(exchange, accepted.created() ? 202 : 200, accepted.status());
         } catch (IllegalArgumentException e) {
             send(exchange, 400, error(e.getMessage()));
+        } catch (PayoutBatcher.IdempotencyConflict e) {
+            send(exchange, 409, error(e.getMessage()));
         } catch (Exception e) {
             LOG.log(Level.SEVERE, "failed to store payout", e);
             send(exchange, 500, error("failed to store payout"));
