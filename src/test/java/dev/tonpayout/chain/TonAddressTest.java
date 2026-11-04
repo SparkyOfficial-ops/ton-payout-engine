@@ -43,6 +43,24 @@ class TonAddressTest {
     }
 
     @Test
+    void payoutFormDisablesBounce() {
+        String bounceable = friendly(0x11, RAW);
+        String plain = TonAddress.nonBounceable(bounceable, "mainnet");
+        assertTrue(plain.startsWith("UQ"));
+        assertEquals(RAW, TonAddress.canonical(plain));
+        assertEquals(plain, TonAddress.nonBounceable(RAW, "mainnet"));
+        assertEquals(plain, TonAddress.nonBounceable(friendly(0x51, RAW), "mainnet"));
+
+        String testnet = TonAddress.nonBounceable(RAW, "testnet");
+        assertTrue(testnet.startsWith("0Q"));
+        assertEquals(RAW, TonAddress.canonical(testnet, "testnet"));
+        assertNull(TonAddress.nonBounceable(friendly(0xD1, RAW), "mainnet"));
+
+        String master = "-1:" + "ab".repeat(32);
+        assertEquals(master, TonAddress.canonical(TonAddress.nonBounceable(master, "mainnet")));
+    }
+
+    @Test
     void brokenChecksumOrGarbageIsNull() {
         String friendly = friendly(0x11, RAW);
         char[] broken = friendly.toCharArray();

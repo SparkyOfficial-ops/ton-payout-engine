@@ -244,6 +244,8 @@ public final class ApiServer {
             String to = row.get("to") != null ? text(row.get("to")) : text(row.get("address"));
             String amount = nanoAmount(row);
             String comment = row.get("comment") == null ? "" : text(row.get("comment"));
+            // Raw workchain:hex is the account id stored for idempotency. It has no bounce bit.
+            // CtonChainSender re-encodes it as non-bounceable before BulkTransfer.
             String destination = TonAddress.canonical(to, config.tonNetwork());
             if (destination == null) {
                 throw new IllegalArgumentException("invalid destination");

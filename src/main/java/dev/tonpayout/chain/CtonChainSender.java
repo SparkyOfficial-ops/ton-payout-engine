@@ -1,11 +1,9 @@
 package dev.tonpayout.chain;
 
 import java.math.BigInteger;
-import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
-import java.util.Base64;
 import java.util.List;
 import java.util.logging.Logger;
 
@@ -43,6 +41,49 @@ public final class CtonChainSender implements ChainSender {
         return !config.walletAddress().isBlank() && Files.isRegularFile(keyPath);
     }
 
+    /**
+     * Reads the key and opens {@code WALLET_ADDRESS} before the API accepts payouts.
+     * A broken key file or an address the sender cannot open aborts startup.
+     */
+    public void requireReady() {
+        if (config.walletAddress().isBlank()) {
+            throw new IllegalStateException("WALLET_ADDRESS is not set");
+        }
+        if (!Files.isRegularFile(keyPath)) {
+            throw new IllegalStateException("wallet key file is missing: " + keyPath);
+        }
+        try (Crypto.PrivateKey key = loadKey();
+                Crypto.PublicKey publicKey = key.getPublicKey();
+                Address self = new Address(config.walletAddress())) {
+            byte[] pub = publicKey.getData();
+            if (pub.length != 32) {
+                throw new IllegalStateException("wallet key does not yield an Ed25519 public key");
+            }
+            byte[] probe = new byte[] { 0x54, 0x4f, 0x4e };
+            byte[] signature = Crypto.sign(key, probe);
+            if (signature.length != 64 || !Crypto.verify(publicKey, probe, signature)) {
+                throw new IllegalStateException("wallet key cannot sign");
+            }
+            String configured = TonAddress.canonical(config.walletAddress(), config.tonNetwork());
+            if (configured == null) {
+                throw new IllegalStateException("WALLET_ADDRESS is not a TON address");
+            }
+            int colon = configured.indexOf(':');
+            int workchain = Integer.parseInt(configured.substring(0, colon));
+            String derived = HighloadAddress.raw(pub, config.subwalletId(), workchain);
+            WalletKeyFile.sameAccount(configured, derived, config.tonNetwork());
+            if (self.toRaw() == null || self.toRaw().isBlank()) {
+                throw new IllegalStateException("WALLET_ADDRESS cannot be opened");
+            }
+            LOG.info("wallet key matches " + configured);
+        } catch (IllegalStateException e) {
+            throw e;
+        } catch (Exception e) {
+            String detail = e.getMessage() == null ? e.getClass().getSimpleName() : e.getMessage();
+            throw new IllegalStateException("wallet key is invalid: " + detail, e);
+        }
+    }
+
     @Override
     public Outgoing prepare(List<Transfer> transfers) throws Exception {
         if (transfers.isEmpty() || transfers.size() > 254) {
@@ -60,12 +101,18 @@ public final class CtonChainSender implements ChainSender {
             BulkTransfer[] bulk = new BulkTransfer[transfers.size()];
             for (int i = 0; i < transfers.size(); i++) {
                 Transfer transfer = transfers.get(i);
-                Address destination = new Address(transfer.to());
+                // UQ / 0Q, never 0:hex. The SDK reads the bounce flag from this form
+                // and would otherwise send bounceable=true to an inactive wallet.
+                String payableTo = TonAddress.nonBounceable(transfer.to(), config.tonNetwork());
+                if (payableTo == null) {
+                    throw new IllegalArgumentException("invalid destination");
+                }
+                Address destination = new Address(payableTo);
                 destinations.add(destination);
                 String comment = transfer.comment() == null || transfer.comment().isBlank()
                         ? null
                         : transfer.comment();
-                bulk[i] = new BulkTransfer(destination, new BigInteger(transfer.amountNano()), comment);
+                bulk[i] = new BulkTransfer(destination, new BigInteger(transfer.amountNano()), comment, 3, false);
             }
             HighloadWallet.PreparedBulk prepared = wallet.prepareBulkTransfer(bulk, key);
             return new Outgoing(prepared.hashHex(), prepared.boc());
@@ -109,44 +156,10 @@ public final class CtonChainSender implements ChainSender {
     }
 
     private Crypto.PrivateKey loadKey() throws Exception {
-        byte[] bytes = Files.readAllBytes(keyPath);
-        if (bytes.length == 32) {
-            return new Crypto.PrivateKey(bytes);
+        WalletKeyFile.Parsed parsed = WalletKeyFile.parse(Files.readAllBytes(keyPath));
+        if (parsed.isMnemonic()) {
+            return Crypto.mnemonicToPrivateKey(parsed.mnemonic());
         }
-        String text = new String(bytes, StandardCharsets.UTF_8).trim();
-        if (text.regionMatches(true, 0, "0x", 0, 2)) {
-            text = text.substring(2).trim();
-        }
-        if (text.matches("(?i)[0-9a-f]{64}")) {
-            return new Crypto.PrivateKey(hex(text));
-        }
-        if (text.indexOf(' ') >= 0) {
-            List<String> words = new ArrayList<>();
-            for (String word : text.split("\\s+")) {
-                if (!word.isBlank()) {
-                    words.add(word);
-                }
-            }
-            return Crypto.mnemonicToPrivateKey(words);
-        }
-        byte[] decoded;
-        try {
-            decoded = Base64.getMimeDecoder().decode(text);
-        } catch (IllegalArgumentException e) {
-            throw new IllegalArgumentException(
-                    "wallet key must be 32 raw bytes, 64 hex characters, base64, or a mnemonic");
-        }
-        if (decoded.length != 32) {
-            throw new IllegalArgumentException("decoded wallet key must be 32 bytes");
-        }
-        return new Crypto.PrivateKey(decoded);
-    }
-
-    private static byte[] hex(String text) {
-        byte[] out = new byte[text.length() / 2];
-        for (int i = 0; i < out.length; i++) {
-            out[i] = (byte) Integer.parseInt(text.substring(i * 2, i * 2 + 2), 16);
-        }
-        return out;
+        return new Crypto.PrivateKey(parsed.seed());
     }
 }

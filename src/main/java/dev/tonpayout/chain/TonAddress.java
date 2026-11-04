@@ -27,6 +27,7 @@ public final class TonAddress {
 
     /**
      * Bounceable and non-bounceable forms of one account become the same raw address.
+     * The raw form has no bounce bit. {@link #nonBounceable} puts that bit back before a payout.
      * Friendly addresses with the testnet bit ({@code kQ} / {@code 0Q}) are rejected
      * unless {@code network} is {@code testnet}. Raw addresses have no network bit.
      */
@@ -100,6 +101,36 @@ public final class TonAddress {
             hash.append(Character.forDigit(piece & 0xF, 16));
         }
         return workchain + ":" + hash;
+    }
+
+    /**
+     * User-friendly form with bounce disabled ({@code UQ} on mainnet, {@code 0Q} on testnet).
+     * cton-sdk treats a raw {@code workchain:hex} address as bounceable, so a payout to an
+     * address that was only stored in that form would bounce off a wallet that is not deployed yet.
+     *
+     * @return null when {@code address} is not a TON address on {@code network}
+     */
+    public static String nonBounceable(String address, String network) {
+        String raw = canonical(address, network);
+        if (raw == null) {
+            return null;
+        }
+        boolean testnet = network != null && network.equalsIgnoreCase("testnet");
+        int colon = raw.indexOf(':');
+        int workchain = Integer.parseInt(raw.substring(0, colon));
+        String hash = raw.substring(colon + 1);
+        byte[] body = new byte[34];
+        body[0] = (byte) (testnet ? 0xD1 : 0x51);
+        body[1] = (byte) workchain;
+        for (int i = 0; i < 32; i++) {
+            body[2 + i] = (byte) Integer.parseInt(hash.substring(i * 2, i * 2 + 2), 16);
+        }
+        int crc = crc16(body, body.length);
+        byte[] full = new byte[36];
+        System.arraycopy(body, 0, full, 0, body.length);
+        full[34] = (byte) (crc >> 8);
+        full[35] = (byte) crc;
+        return Base64.getUrlEncoder().withoutPadding().encodeToString(full);
     }
 
     private static boolean isHex(String value) {

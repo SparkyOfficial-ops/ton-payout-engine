@@ -24,6 +24,7 @@ public final class PayoutEngine {
     public static void main(String[] args) throws Exception {
         EngineConfig config = EngineConfig.load();
         CtonChainSender chain = new CtonChainSender(config);
+        chain.requireReady();
         WebhookNotifier webhook = new WebhookNotifier(config);
         PayoutStore store = new PayoutStore(Path.of(config.dbPath()));
         PayoutBatcher batcher = new PayoutBatcher(config, chain, webhook, store);
@@ -47,9 +48,7 @@ public final class PayoutEngine {
                 LOG.log(Level.WARNING, "database close failed", e);
             }
         }));
-        LOG.info(chain.isReady()
-                ? "ton-payout-engine started, highload sender ready"
-                : "ton-payout-engine started, set WALLET_ADDRESS and WALLET_KEY_PATH before sending");
+        LOG.info("ton-payout-engine started, highload sender ready");
         Thread.currentThread().join();
     }
 }
