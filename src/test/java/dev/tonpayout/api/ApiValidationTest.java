@@ -27,6 +27,7 @@ import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 
 import dev.tonpayout.chain.BlockInclusion;
+import dev.tonpayout.chain.TonAddress;
 import dev.tonpayout.chain.ChainSender;
 import dev.tonpayout.chain.ChainSender.Outgoing;
 import dev.tonpayout.config.EngineConfig;
@@ -59,6 +60,7 @@ class ApiValidationTest {
         properties.setProperty("auth.apiKey", "test-key");
         properties.setProperty("db.path", DB.toString());
         properties.setProperty("ton.network", "mainnet");
+        properties.setProperty("usdt.jettonWallet", TO);
         config = EngineConfig.from(properties);
         store = new PayoutStore(DB);
         ChainSender chain = new ChainSender() {
@@ -80,7 +82,7 @@ class ApiValidationTest {
         WebhookNotifier webhook = new WebhookNotifier(config);
         PayoutBatcher batcher = new PayoutBatcher(config, chain, webhook, store);
         BlockInclusion inclusion = hashes -> true;
-        server = new ApiServer(config, batcher, chain, new SendingRecovery(config, store, webhook, inclusion), store);
+        server = new ApiServer(config, batcher, chain, new SendingRecovery(config, store, inclusion), store);
         server.start();
         client = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(2)).build();
     }
@@ -108,7 +110,47 @@ class ApiValidationTest {
                 + "{\"to\":\"" + TO + "\",\"amount\":\"0.000000001\"}]}";
         HttpResponse<String> response = post("exact", body);
         assertEquals(202, response.statusCode());
-        assertEquals(List.of("100000000", "1"), storedAmounts());
+        List<String> amounts = storedAmounts();
+        assertEquals(List.of("100000000", "1"), amounts.subList(amounts.size() - 2, amounts.size()));
+    }
+
+    @Test
+    void uqAddressIsStoredNonBounceable() throws Exception {
+        String uq = TonAddress.nonBounceable(TO, "mainnet");
+        HttpResponse<String> response = post("uq-flag",
+                "{\"transfers\":[{\"to\":\"" + uq + "\",\"amount\":\"0.1\"}]}");
+        assertEquals(202, response.statusCode());
+        assertEquals(List.of(0), storedBounceFlags());
+        String raw = TonAddress.canonical(uq, "mainnet");
+        long reloaded = store.loadQueued().stream()
+                .filter(row -> raw.equals(row.transfer().to()) && !row.transfer().bounceable())
+                .count();
+        assertEquals(1, reloaded);
+    }
+
+    @Test
+    void usdtUsesSixDecimalsAndIsStored() throws Exception {
+        assertEquals("1500000", ApiServer.nanoAmount(Json.asObject(
+                Json.parse("{\"amount\":\"1.5\",\"currency\":\"USDT\"}"))));
+        assertThrows(IllegalArgumentException.class, () -> ApiServer.nanoAmount(Json.asObject(
+                Json.parse("{\"amount\":\"0.0000001\",\"currency\":\"USDT\"}"))));
+        assertThrows(IllegalArgumentException.class, () -> ApiServer.nanoAmount(Json.asObject(
+                Json.parse("{\"amount\":\"1\",\"currency\":\"BTC\"}"))));
+        HttpResponse<String> response = post("usdt",
+                "{\"transfers\":[{\"to\":\"" + TO + "\",\"amount\":\"1.5\",\"currency\":\"USDT\"}]}");
+        assertEquals(202, response.statusCode());
+        assertEquals("USDT", store.loadQueued().stream()
+                .filter(row -> row.transfer().usdt())
+                .reduce((first, second) -> second)
+                .orElseThrow()
+                .transfer()
+                .currency());
+        assertEquals("1500000", store.loadQueued().stream()
+                .filter(row -> row.transfer().usdt())
+                .reduce((first, second) -> second)
+                .orElseThrow()
+                .transfer()
+                .amountNano());
     }
 
     @Test
@@ -132,6 +174,43 @@ class ApiValidationTest {
         assertNull(store.findIdempotent("too-many"));
     }
 
+    @Test
+    void statusListsEachTransfer() throws Exception {
+        HttpResponse<String> created = post("status-detail",
+                "{\"transfers\":["
+                        + "{\"to\":\"" + TO + "\",\"amount\":\"0.1\"},"
+                        + "{\"to\":\"" + TO + "\",\"amount\":\"1.5\",\"currency\":\"USDT\"}"
+                        + "]}");
+        assertEquals(202, created.statusCode());
+        String batchId = (String) Json.asObject(Json.parse(created.body())).get("batchId");
+        HttpResponse<String> status = get("/api/v1/status/" + batchId, true);
+        assertEquals(200, status.statusCode());
+        Map<String, Object> body = Json.asObject(Json.parse(status.body()));
+        @SuppressWarnings("unchecked")
+        List<Map<String, Object>> transfers = (List<Map<String, Object>>) body.get("transfers");
+        assertEquals(2, transfers.size());
+        assertEquals(TO, transfers.get(0).get("to"));
+        assertEquals("0.1", transfers.get(0).get("amount"));
+        assertEquals("queued", transfers.get(0).get("status"));
+        assertEquals("1.5", transfers.get(1).get("amount"));
+        assertEquals("queued", transfers.get(1).get("status"));
+    }
+
+    @Test
+    void metricsAreOpenMetricsWithoutApiKey() throws Exception {
+        HttpResponse<String> response = get("/metrics", false);
+        assertEquals(200, response.statusCode());
+        assertTrue(response.headers().firstValue("Content-Type").orElse("")
+                .startsWith("application/openmetrics-text"));
+        String body = response.body();
+        assertTrue(body.contains("\npayout_queue_size ") || body.startsWith("payout_queue_size "));
+        assertTrue(body.contains("wallet_balance_nano 1000000000000\n"));
+        assertTrue(body.contains("batch_processing_duration_seconds_bucket{le=\"+Inf\"} "));
+        assertTrue(body.contains("batch_processing_duration_seconds_count "));
+        assertTrue(body.contains("toncenter_errors_total "));
+        assertTrue(body.endsWith("# EOF\n"));
+    }
+
     private static Map<String, Object> amount(String ton) {
         return Json.asObject(Json.parse("{\"amount\":\"" + ton + "\"}"));
     }
@@ -146,6 +225,17 @@ class ApiValidationTest {
                 .POST(HttpRequest.BodyPublishers.ofString(body))
                 .build();
         return client.send(request, HttpResponse.BodyHandlers.ofString());
+    }
+
+    private static HttpResponse<String> get(String path, boolean authorized) throws Exception {
+        HttpRequest.Builder request = HttpRequest.newBuilder()
+                .uri(URI.create("http://127.0.0.1:" + config.httpPort() + path))
+                .timeout(Duration.ofSeconds(5))
+                .GET();
+        if (authorized) {
+            request.header("X-Api-Key", config.apiKey());
+        }
+        return client.send(request.build(), HttpResponse.BodyHandlers.ofString());
     }
 
     private static void deleteDb(Path db) throws Exception {
@@ -168,5 +258,18 @@ class ApiValidationTest {
             }
         }
         return amounts;
+    }
+
+    private static List<Integer> storedBounceFlags() throws Exception {
+        List<Integer> flags = new ArrayList<>();
+        try (Connection connection = DriverManager.getConnection("jdbc:sqlite:" + DB.toAbsolutePath());
+                Statement statement = connection.createStatement();
+                ResultSet rows = statement.executeQuery(
+                        "SELECT bounceable FROM transfers ORDER BY id DESC LIMIT 1")) {
+            while (rows.next()) {
+                flags.add(rows.getInt(1));
+            }
+        }
+        return flags;
     }
 }

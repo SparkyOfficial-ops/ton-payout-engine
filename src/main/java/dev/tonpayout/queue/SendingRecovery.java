@@ -2,15 +2,17 @@ package dev.tonpayout.queue;
 
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.logging.Logger;
 
 import dev.tonpayout.chain.BlockInclusion;
 import dev.tonpayout.chain.ChainLook;
 import dev.tonpayout.chain.MessageHashes;
 import dev.tonpayout.config.EngineConfig;
-import dev.tonpayout.notify.WebhookNotifier;
+import dev.tonpayout.log.BatchMdc;
 import dev.tonpayout.queue.PayoutStore.BatchOutcome;
 import dev.tonpayout.queue.PayoutStore.StuckSending;
 
@@ -30,28 +32,59 @@ public final class SendingRecovery {
 
     private final EngineConfig config;
     private final PayoutStore store;
-    private final WebhookNotifier webhook;
     private final BlockInclusion inclusion;
     private final Map<String, Long> retryAfter = new HashMap<>();
+    /** Sending batches found at startup. The chain is checked again without the stale wait. */
+    private final Set<String> interrupted = new HashSet<>();
+    private boolean startupDone;
 
-    public SendingRecovery(EngineConfig config, PayoutStore store, WebhookNotifier webhook, BlockInclusion inclusion) {
+    public SendingRecovery(EngineConfig config, PayoutStore store, BlockInclusion inclusion) {
         this.config = config;
         this.store = store;
-        this.webhook = webhook;
         this.inclusion = inclusion;
     }
 
     public synchronized List<BatchOutcome> sweep() throws Exception {
-        return sweep(new ChainLook(inclusion));
+        return sweep(new ChainLook(inclusion), !startupDone);
     }
 
     synchronized List<BatchOutcome> sweep(ChainLook look) throws Exception {
-        long updatedBefore = System.currentTimeMillis() - config.sendingStaleMs();
+        return sweep(look, false);
+    }
+
+    /**
+     * @param startup every {@code sending} batch belongs to the previous process,
+     *                so the chain is checked now instead of after {@code sendingStaleMs}
+     */
+    private List<BatchOutcome> sweep(ChainLook look, boolean startup) throws Exception {
+        if (startup) {
+            startupDone = true;
+        }
+        long updatedBefore = startup
+                ? Long.MAX_VALUE
+                : System.currentTimeMillis() - config.sendingStaleMs();
+        List<StuckSending> due = new ArrayList<>(store.staleSending(updatedBefore));
+        if (startup) {
+            interrupted.clear();
+            for (StuckSending batch : due) {
+                interrupted.add(batch.batchId());
+            }
+        } else if (!interrupted.isEmpty()) {
+            Set<String> seen = new HashSet<>();
+            for (StuckSending batch : due) {
+                seen.add(batch.batchId());
+            }
+            for (StuckSending batch : store.staleSending(Long.MAX_VALUE)) {
+                if (interrupted.contains(batch.batchId()) && seen.add(batch.batchId())) {
+                    due.add(batch);
+                }
+            }
+        }
         List<BatchOutcome> resolved = new ArrayList<>();
-        for (StuckSending batch : store.staleSending(updatedBefore)) {
+        for (StuckSending batch : due) {
             BatchOutcome outcome = resolve(batch, look);
             if (outcome != null && outcome.terminal()) {
-                webhook.batchUpdated(outcome.batchId(), outcome.status(), outcome.count(), outcome.txHash(), outcome.error());
+                interrupted.remove(batch.batchId());
                 resolved.add(outcome);
             }
         }
@@ -59,6 +92,15 @@ public final class SendingRecovery {
     }
 
     private BatchOutcome resolve(StuckSending batch, ChainLook look) throws Exception {
+        BatchMdc.set(batch.batchId());
+        try {
+            return resolveOne(batch, look);
+        } finally {
+            BatchMdc.clear();
+        }
+    }
+
+    private BatchOutcome resolveOne(StuckSending batch, ChainLook look) throws Exception {
         long now = System.currentTimeMillis();
         if (retryAfter.getOrDefault(batch.batchId(), 0L) > now) {
             return null;

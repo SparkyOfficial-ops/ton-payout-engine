@@ -20,6 +20,8 @@ import dev.tonpayout.chain.ChainSender;
 import dev.tonpayout.chain.ChainSender.Outgoing;
 import dev.tonpayout.chain.TonAddress;
 import dev.tonpayout.config.EngineConfig;
+import dev.tonpayout.log.BatchMdc;
+import dev.tonpayout.metrics.EngineMetrics;
 import dev.tonpayout.notify.WebhookNotifier;
 import dev.tonpayout.queue.PayoutStore.BatchOutcome;
 import dev.tonpayout.queue.PayoutStore.DuplicateIdempotencyKey;
@@ -55,26 +57,32 @@ public final class PayoutBatcher {
             return replay(existing, requestHash);
         }
         String batchId = UUID.randomUUID().toString();
-        List<QueuedTransfer> stored;
+        BatchMdc.set(batchId);
         try {
-            stored = store.insertQueued(batchId, idempotencyKey, requestHash, transfers);
-        } catch (DuplicateIdempotencyKey e) {
-            existing = store.findIdempotent(idempotencyKey);
-            if (existing == null) {
-                throw e;
+            List<QueuedTransfer> stored;
+            try {
+                stored = store.insertQueued(batchId, idempotencyKey, requestHash, transfers);
+            } catch (DuplicateIdempotencyKey e) {
+                existing = store.findIdempotent(idempotencyKey);
+                if (existing == null) {
+                    throw e;
+                }
+                return replay(existing, requestHash);
             }
-            return replay(existing, requestHash);
+            for (QueuedTransfer row : stored) {
+                queue.add(new Item(row.id(), row.batchId(), row.transfer()));
+            }
+            LOG.info("accepted payout, transfers " + transfers.size());
+            Map<String, Object> body = new LinkedHashMap<>();
+            body.put("batchId", batchId);
+            body.put("status", "queued");
+            body.put("count", transfers.size());
+            body.put("txHash", null);
+            body.put("error", null);
+            return new AcceptResult(body, true);
+        } finally {
+            BatchMdc.clear();
         }
-        for (QueuedTransfer row : stored) {
-            queue.add(new Item(row.id(), row.batchId(), row.transfer()));
-        }
-        Map<String, Object> body = new LinkedHashMap<>();
-        body.put("batchId", batchId);
-        body.put("status", "queued");
-        body.put("count", transfers.size());
-        body.put("txHash", null);
-        body.put("error", null);
-        return new AcceptResult(body, true);
     }
 
     private static AcceptResult replay(IdempotentHit existing, String requestHash) {
@@ -90,6 +98,9 @@ public final class PayoutBatcher {
             canonical.append(transfer.to()).append('\n')
                     .append(transfer.amountNano()).append('\n')
                     .append(transfer.comment() == null ? "" : transfer.comment()).append('\n');
+            if (transfer.usdt()) {
+                canonical.append(transfer.currency()).append('\n');
+            }
         }
         try {
             byte[] digest = MessageDigest.getInstance("SHA-256").digest(canonical.toString().getBytes(java.nio.charset.StandardCharsets.UTF_8));
@@ -120,8 +131,7 @@ public final class PayoutBatcher {
         int sending = store.countSending();
         LOG.info("loaded " + pending.size() + " queued transfers from " + config.dbPath());
         if (sending > 0) {
-            LOG.warning(sending + " transfers are sending from a previous run and will not be broadcast again; "
-                    + "after " + config.sendingStaleMs() + " ms they are confirmed from the chain or marked failed");
+            LOG.warning(sending + " transfers are still sending from a previous run and will not be broadcast again");
         }
         running = true;
         worker = new Thread(this::loop, "payout-batcher");
@@ -291,6 +301,16 @@ public final class PayoutBatcher {
             byBatch.computeIfAbsent(item.batchId, key -> new ArrayList<>()).add(item.id);
         }
 
+        BatchMdc.set(String.join(",", byBatch.keySet()));
+        try {
+            return dispatchReady(live, buffer, ids, transfers, byBatch);
+        } finally {
+            BatchMdc.clear();
+        }
+    }
+
+    private long dispatchReady(List<Item> live, List<Item> buffer, List<Long> ids, List<Transfer> transfers,
+            Map<String, List<Long>> byBatch) throws SQLException {
         if (!chain.isReady()) {
             fail(byBatch, buffer, "wallet address or key file is not set");
             return 0;
@@ -307,6 +327,7 @@ public final class PayoutBatcher {
                         "insufficient balance: need " + need + " nano, have " + have + " nano");
             }
         } catch (Exception e) {
+            EngineMetrics.instance().toncenterError();
             LOG.log(Level.WARNING, "balance check failed", e);
             String message = e.getMessage() == null ? e.getClass().getSimpleName() : e.getMessage();
             return hold(live, buffer, byBatch, need, "unknown", "balance check failed: " + message);
@@ -403,6 +424,9 @@ public final class PayoutBatcher {
                 chain.broadcast(outgoing);
                 return null;
             } catch (Exception e) {
+                if (!(e instanceof InterruptedException)) {
+                    EngineMetrics.instance().toncenterError();
+                }
                 lastError = e;
                 if (attempt == 3) {
                     break;
@@ -506,7 +530,11 @@ public final class PayoutBatcher {
     private BigInteger requiredNano(List<Transfer> transfers) {
         BigInteger sum = networkFeeNano(transfers.size());
         for (Transfer transfer : transfers) {
-            sum = sum.add(new BigInteger(transfer.amountNano()));
+            if (transfer.usdt()) {
+                sum = sum.add(BigInteger.valueOf(config.usdtGasNano()));
+            } else {
+                sum = sum.add(new BigInteger(transfer.amountNano()));
+            }
         }
         return sum;
     }
@@ -522,6 +550,9 @@ public final class PayoutBatcher {
 
     private void notify(BatchOutcome outcome) {
         if (!outcome.terminal()) {
+            return;
+        }
+        if ("confirmed".equals(outcome.status()) || "failed".equals(outcome.status())) {
             return;
         }
         webhook.batchUpdated(outcome.batchId(), outcome.status(), outcome.count(), outcome.txHash(), outcome.error());

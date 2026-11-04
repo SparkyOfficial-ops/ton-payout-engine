@@ -1,5 +1,6 @@
 package dev.tonpayout.notify;
 
+import java.io.IOException;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
@@ -51,6 +52,33 @@ public final class WebhookNotifier {
         body.put("balanceNano", balanceNano);
         body.put("feeReserveNano", feeNano);
         post(config.alertUrl(), body, "balance");
+    }
+
+    /**
+     * @return true when the client answers 2xx. The caller keeps the event until this is true.
+     */
+    public boolean deliver(String payload) {
+        if (config.webhookUrl().isBlank()) {
+            return false;
+        }
+        HttpRequest request = HttpRequest.newBuilder(URI.create(config.webhookUrl()))
+                .timeout(Duration.ofMillis(config.webhookTimeoutMs()))
+                .header("Content-Type", "application/json")
+                .POST(HttpRequest.BodyPublishers.ofString(payload))
+                .build();
+        try {
+            HttpResponse<Void> response = client.send(request, HttpResponse.BodyHandlers.discarding());
+            return response.statusCode() / 100 == 2;
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            return false;
+        } catch (IOException e) {
+            return false;
+        }
+    }
+
+    long timeoutMs() {
+        return config.webhookTimeoutMs();
     }
 
     private void post(String url, Map<String, Object> body, String label) {

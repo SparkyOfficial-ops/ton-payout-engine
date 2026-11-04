@@ -8,7 +8,9 @@ import dev.tonpayout.api.ApiServer;
 import dev.tonpayout.chain.CtonChainSender;
 import dev.tonpayout.chain.TonCenterBlockInclusion;
 import dev.tonpayout.config.EngineConfig;
+import dev.tonpayout.log.LoggingSetup;
 import dev.tonpayout.notify.WebhookNotifier;
+import dev.tonpayout.notify.WebhookOutbox;
 import dev.tonpayout.queue.Housekeeping;
 import dev.tonpayout.queue.PayoutBatcher;
 import dev.tonpayout.queue.PayoutStore;
@@ -22,25 +24,34 @@ public final class PayoutEngine {
     }
 
     public static void main(String[] args) throws Exception {
+        LoggingSetup.install();
         EngineConfig config = EngineConfig.load();
         CtonChainSender chain = new CtonChainSender(config);
         chain.requireReady();
         WebhookNotifier webhook = new WebhookNotifier(config);
         PayoutStore store = new PayoutStore(Path.of(config.dbPath()));
+        if (!config.webhookUrl().isBlank()) {
+            store.recordWebhooks(true);
+        }
         PayoutBatcher batcher = new PayoutBatcher(config, chain, webhook, store);
         TonCenterBlockInclusion inclusion = new TonCenterBlockInclusion(config);
-        SendingRecovery recovery = new SendingRecovery(config, store, webhook, inclusion);
-        TxPoller poller = new TxPoller(config, store, webhook, inclusion, recovery);
+        SendingRecovery recovery = new SendingRecovery(config, store, inclusion);
+        TxPoller poller = new TxPoller(config, store, inclusion, recovery);
+        WebhookOutbox outbox = new WebhookOutbox(store, webhook);
         Housekeeping housekeeping = new Housekeeping(config, store);
         ApiServer api = new ApiServer(config, batcher, chain, recovery, store);
-        batcher.start();
         poller.start();
+        batcher.start();
+        if (!config.webhookUrl().isBlank()) {
+            outbox.start();
+        }
         housekeeping.start();
         api.start();
         Runtime.getRuntime().addShutdownHook(new Thread(() -> {
             api.stop();
             batcher.stop();
             poller.stop();
+            outbox.stop();
             housekeeping.stop();
             try {
                 store.close();

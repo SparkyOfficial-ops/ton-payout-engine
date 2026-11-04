@@ -19,6 +19,18 @@ public final class TonAddress {
     }
 
     /**
+     * {@code UQ} and {@code 0Q} are non-bounceable. Every other form, including raw
+     * {@code workchain:hex}, stays bounceable.
+     */
+    public static boolean bounceable(String address) {
+        if (address == null) {
+            return true;
+        }
+        String value = address.trim();
+        return !value.startsWith("UQ") && !value.startsWith("0Q");
+    }
+
+    /**
      * @return raw {@code workchain:64hex} on mainnet, or null when the text is not a TON address
      */
     public static String canonical(String address) {
@@ -27,7 +39,7 @@ public final class TonAddress {
 
     /**
      * Bounceable and non-bounceable forms of one account become the same raw address.
-     * The raw form has no bounce bit. {@link #nonBounceable} puts that bit back before a payout.
+     * The raw form has no bounce bit. {@link #bounceable} records whether the original text was {@code UQ} or {@code 0Q}.
      * Friendly addresses with the testnet bit ({@code kQ} / {@code 0Q}) are rejected
      * unless {@code network} is {@code testnet}. Raw addresses have no network bit.
      */

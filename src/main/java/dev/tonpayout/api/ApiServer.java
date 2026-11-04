@@ -20,9 +20,12 @@ import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpServer;
 
 import dev.tonpayout.chain.ChainSender;
+import dev.tonpayout.chain.Currency;
 import dev.tonpayout.chain.TonAddress;
 import dev.tonpayout.config.EngineConfig;
 import dev.tonpayout.json.Json;
+import dev.tonpayout.log.BatchMdc;
+import dev.tonpayout.metrics.EngineMetrics;
 import dev.tonpayout.queue.PayoutBatcher;
 import dev.tonpayout.queue.PayoutStore;
 import dev.tonpayout.queue.PayoutStore.BatchOutcome;
@@ -53,6 +56,7 @@ public final class ApiServer {
     public void start() throws IOException {
         server = HttpServer.create(new InetSocketAddress(config.httpHost(), config.httpPort()), 0);
         server.createContext("/health", this::health);
+        server.createContext("/metrics", this::metrics);
         server.createContext("/api/v1/payout", this::payout);
         server.createContext("/api/v1/status", this::status);
         server.createContext("/api/v1/balance", this::balance);
@@ -149,8 +153,10 @@ public final class ApiServer {
             send(exchange, 404, error("batch id required"));
             return;
         }
+        String batchId = path.substring(prefix.length());
+        BatchMdc.set(batchId);
         try {
-            Map<String, Object> body = batcher.status(path.substring(prefix.length()));
+            Map<String, Object> body = batcher.status(batchId);
             if (body == null) {
                 send(exchange, 404, error("batch not found"));
                 return;
@@ -159,6 +165,33 @@ public final class ApiServer {
         } catch (Exception e) {
             LOG.log(Level.SEVERE, "failed to read payout status", e);
             send(exchange, 500, error("failed to read payout status"));
+        } finally {
+            BatchMdc.clear();
+        }
+    }
+
+    private void metrics(HttpExchange exchange) throws IOException {
+        if (!"GET".equals(exchange.getRequestMethod())) {
+            send(exchange, 405, error("method not allowed"));
+            return;
+        }
+        try {
+            try {
+                EngineMetrics.instance().noteBalance(chain.balanceNano());
+            } catch (Exception e) {
+                EngineMetrics.instance().toncenterError();
+                LOG.log(Level.WARNING, "metrics balance check failed", e);
+            }
+            byte[] body = EngineMetrics.instance().render(store.countQueued()).getBytes(StandardCharsets.UTF_8);
+            exchange.getResponseHeaders().set("Content-Type",
+                    "application/openmetrics-text; version=1.0.0; charset=utf-8");
+            exchange.sendResponseHeaders(200, body.length);
+            try (OutputStream out = exchange.getResponseBody()) {
+                out.write(body);
+            }
+        } catch (Exception e) {
+            LOG.log(Level.SEVERE, "metrics scrape failed", e);
+            send(exchange, 500, error("metrics scrape failed"));
         }
     }
 
@@ -178,6 +211,7 @@ public final class ApiServer {
             body.put("balanceNano", chain.balanceNano());
             send(exchange, 200, body);
         } catch (Exception e) {
+            EngineMetrics.instance().toncenterError();
             body.put("balanceNano", null);
             body.put("error", e.getMessage());
             send(exchange, 502, body);
@@ -242,10 +276,14 @@ public final class ApiServer {
         for (Object item : list) {
             Map<String, Object> row = Json.asObject(item);
             String to = row.get("to") != null ? text(row.get("to")) : text(row.get("address"));
-            String amount = nanoAmount(row);
+            String currency = Currency.parse(row.get("currency") == null ? null : text(row.get("currency")));
+            if (Currency.USDT.equals(currency)
+                    && TonAddress.canonical(config.usdtJettonWallet(), config.tonNetwork()) == null) {
+                throw new IllegalArgumentException("USDT_JETTON_WALLET is not set");
+            }
+            String amount = nanoAmount(row, currency);
             String comment = row.get("comment") == null ? "" : text(row.get("comment"));
-            // Raw workchain:hex is the account id stored for idempotency. It has no bounce bit.
-            // CtonChainSender re-encodes it as non-bounceable before BulkTransfer.
+            boolean bounceable = TonAddress.bounceable(to);
             String destination = TonAddress.canonical(to, config.tonNetwork());
             if (destination == null) {
                 throw new IllegalArgumentException("invalid destination");
@@ -254,12 +292,17 @@ public final class ApiServer {
             if (comment.length() > 120) {
                 throw new IllegalArgumentException("comment is too long");
             }
-            transfers.add(new Transfer(to, amount, comment));
+            transfers.add(new Transfer(to, amount, comment, bounceable, currency));
         }
         return transfers;
     }
 
     static String nanoAmount(Map<String, Object> row) {
+        String currency = Currency.parse(row.get("currency") == null ? null : String.valueOf(row.get("currency")));
+        return nanoAmount(row, currency);
+    }
+
+    static String nanoAmount(Map<String, Object> row, String currency) {
         if (row.get("amountNano") != null) {
             String amount = text(row.get("amountNano")).trim();
             try {
@@ -279,9 +322,10 @@ public final class ApiServer {
             if (ton.signum() <= 0) {
                 throw new IllegalArgumentException("amount must be positive");
             }
-            return ton.movePointRight(9).toBigIntegerExact().toString();
+            return ton.movePointRight(Currency.decimals(currency)).toBigIntegerExact().toString();
         } catch (NumberFormatException | ArithmeticException e) {
-            throw new IllegalArgumentException("amount must be a positive TON value with at most 9 decimal places");
+            throw new IllegalArgumentException("amount must be a positive " + currency
+                    + " value with at most " + Currency.decimals(currency) + " decimal places");
         }
     }
 

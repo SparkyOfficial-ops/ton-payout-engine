@@ -12,6 +12,7 @@ import com.cton.contract.BaseWallet;
 import com.cton.contract.BulkTransfer;
 import com.cton.contract.HighloadWallet;
 import com.cton.sdk.Address;
+import com.cton.sdk.Cell;
 import com.cton.sdk.Crypto;
 
 import dev.tonpayout.config.EngineConfig;
@@ -94,29 +95,43 @@ public final class CtonChainSender implements ChainSender {
         }
 
         List<Address> destinations = new ArrayList<>(transfers.size());
+        List<Cell> bodies = new ArrayList<>();
         try (Crypto.PrivateKey key = loadKey();
              Address self = new Address(config.walletAddress())) {
             HighloadWallet wallet = new HighloadWallet(
                     self, api, config.subwalletId(), queryTtlSeconds(config.messageTtlMs()));
             BulkTransfer[] bulk = new BulkTransfer[transfers.size()];
+            String responseRaw = TonAddress.canonical(config.walletAddress(), config.tonNetwork());
+            String jettonWallet = TonAddress.canonical(config.usdtJettonWallet(), config.tonNetwork());
             for (int i = 0; i < transfers.size(); i++) {
                 Transfer transfer = transfers.get(i);
-                // UQ / 0Q, never 0:hex. The SDK reads the bounce flag from this form
-                // and would otherwise send bounceable=true to an inactive wallet.
-                String payableTo = TonAddress.nonBounceable(transfer.to(), config.tonNetwork());
-                if (payableTo == null) {
-                    throw new IllegalArgumentException("invalid destination");
-                }
-                Address destination = new Address(payableTo);
-                destinations.add(destination);
                 String comment = transfer.comment() == null || transfer.comment().isBlank()
                         ? null
                         : transfer.comment();
-                bulk[i] = new BulkTransfer(destination, new BigInteger(transfer.amountNano()), comment, 3, false);
+                if (transfer.usdt()) {
+                    if (jettonWallet == null) {
+                        throw new IllegalStateException("USDT_JETTON_WALLET is not set");
+                    }
+                    Address destination = new Address(jettonWallet);
+                    destinations.add(destination);
+                    Cell body = JettonTransfer.toCell(
+                            transfer.to(), responseRaw, new BigInteger(transfer.amountNano()), comment);
+                    bodies.add(body);
+                    bulk[i] = new BulkTransfer(
+                            destination, BigInteger.valueOf(config.usdtGasNano()), body, 3, true);
+                } else {
+                    Address destination = new Address(transfer.to());
+                    destinations.add(destination);
+                    bulk[i] = new BulkTransfer(
+                            destination, new BigInteger(transfer.amountNano()), comment, 3, transfer.bounceable());
+                }
             }
             HighloadWallet.PreparedBulk prepared = wallet.prepareBulkTransfer(bulk, key);
             return new Outgoing(prepared.hashHex(), prepared.boc());
         } finally {
+            for (Cell body : bodies) {
+                body.close();
+            }
             for (Address destination : destinations) {
                 destination.close();
             }

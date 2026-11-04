@@ -31,6 +31,8 @@ public final class EngineConfig {
     private final long sendingStaleMs;
     private final long housekeepingRetentionMs;
     private final long housekeepingIntervalMs;
+    private final String usdtJettonWallet;
+    private final long usdtGasNano;
 
     private EngineConfig(Properties properties) {
         this(properties, true);
@@ -88,6 +90,10 @@ public final class EngineConfig {
         housekeepingIntervalMs = parseLong(
                 setting(properties, environment, "housekeeping.intervalMs", "HOUSEKEEPING_INTERVAL_MS", "86400000"),
                 "housekeeping.intervalMs", 1_000, 2_592_000_000L);
+        usdtJettonWallet = setting(properties, environment, "usdt.jettonWallet", "USDT_JETTON_WALLET", "");
+        usdtGasNano = parseLong(
+                setting(properties, environment, "usdt.gasNano", "USDT_GAS_NANO", "50000000"),
+                "usdt.gasNano", 1_000_000, 1_000_000_000L);
     }
 
     public static EngineConfig load() throws IOException {
@@ -160,4 +166,6 @@ public final class EngineConfig {
     public long sendingStaleMs() { return sendingStaleMs; }
     public long housekeepingRetentionMs() { return housekeepingRetentionMs; }
     public long housekeepingIntervalMs() { return housekeepingIntervalMs; }
+    public String usdtJettonWallet() { return usdtJettonWallet; }
+    public long usdtGasNano() { return usdtGasNano; }
 }

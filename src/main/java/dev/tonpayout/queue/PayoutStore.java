@@ -14,24 +14,35 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
+import dev.tonpayout.chain.AmountText;
 import dev.tonpayout.chain.MessageHashes;
+import dev.tonpayout.json.Json;
+import dev.tonpayout.metrics.EngineMetrics;
+import dev.tonpayout.notify.WebhookRetry;
 
 public final class PayoutStore implements AutoCloseable {
     private static final int BUSY_TIMEOUT_MS = 5_000;
     private static final int PING_TIMEOUT_MS = 500;
 
+    /** Serialized writes. Status, idempotency and health use {@link #reader()} instead. */
     private final Connection connection;
+    private final Path databasePath;
+    private final ThreadLocal<Connection> readers = new ThreadLocal<>();
+    private final List<Connection> readerConnections = new ArrayList<>();
+    private volatile boolean closed;
+    private boolean recordWebhooks;
 
     public PayoutStore(Path database) throws SQLException {
+        databasePath = database.toAbsolutePath();
         try {
-            Path parent = database.toAbsolutePath().getParent();
+            Path parent = databasePath.getParent();
             if (parent != null) {
                 Files.createDirectories(parent);
             }
         } catch (java.io.IOException e) {
             throw new SQLException("cannot create database directory", e);
         }
-        connection = DriverManager.getConnection("jdbc:sqlite:" + database.toAbsolutePath());
+        connection = DriverManager.getConnection("jdbc:sqlite:" + databasePath);
         try (Statement statement = connection.createStatement()) {
             statement.execute("PRAGMA auto_vacuum=INCREMENTAL");
             statement.execute("PRAGMA journal_mode=WAL");
@@ -56,23 +67,83 @@ public final class PayoutStore implements AutoCloseable {
                         destination TEXT NOT NULL,
                         amount_nano TEXT NOT NULL,
                         comment TEXT,
-                        status TEXT NOT NULL
+                        status TEXT NOT NULL,
+                        bounceable INTEGER NOT NULL DEFAULT 0,
+                        currency TEXT NOT NULL DEFAULT 'TON'
                     )
                     """);
             statement.execute("CREATE INDEX IF NOT EXISTS idx_transfers_batch ON transfers(batch_id)");
             statement.execute("CREATE INDEX IF NOT EXISTS idx_transfers_status ON transfers(status)");
+            statement.execute("""
+                    CREATE TABLE IF NOT EXISTS webhook_events (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        batch_id TEXT NOT NULL,
+                        payload TEXT NOT NULL,
+                        attempts INTEGER NOT NULL,
+                        next_retry_at INTEGER NOT NULL,
+                        status TEXT NOT NULL
+                    )
+                    """);
+            statement.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_webhook_due ON webhook_events(status, next_retry_at)");
         }
         addColumn("confirm_checks", "INTEGER NOT NULL DEFAULT 0");
         addColumn("idempotency_key", "TEXT");
         addColumn("request_hash", "TEXT");
         addColumn("sent_at", "INTEGER");
+        addTransferColumn("transfers", "bounceable", "INTEGER NOT NULL DEFAULT 0");
+        addTransferColumn("transfers", "currency", "TEXT NOT NULL DEFAULT 'TON'");
         try (Statement statement = connection.createStatement()) {
             statement.execute("UPDATE batches SET sent_at = updated_at WHERE sent_at IS NULL AND status = 'sent'");
             statement.execute(
                     "CREATE UNIQUE INDEX IF NOT EXISTS idx_batches_idempotency ON batches(idempotency_key)");
             statement.execute("CREATE INDEX IF NOT EXISTS idx_batches_updated ON batches(updated_at)");
         }
-        attachArchive(database);
+        prepareArchive(archivePath(databasePath));
+        attachArchive(connection, true);
+        addTransferColumn("archive.transfers", "bounceable", "INTEGER NOT NULL DEFAULT 0");
+        addTransferColumn("archive.transfers", "currency", "TEXT NOT NULL DEFAULT 'TON'");
+    }
+
+    /**
+     * One SQLite connection per calling thread. WAL lets these reads run while a write
+     * holds {@code connection}. A connection itself is not safe to share across threads.
+     */
+    private Connection reader() throws SQLException {
+        Connection existing = readers.get();
+        if (existing != null && !existing.isClosed()) {
+            return existing;
+        }
+        synchronized (readerConnections) {
+            if (closed) {
+                throw new SQLException("store is closed");
+            }
+            Connection opened = openReader();
+            readers.set(opened);
+            readerConnections.add(opened);
+            return opened;
+        }
+    }
+
+    private Connection openReader() throws SQLException {
+        Connection reading = DriverManager.getConnection("jdbc:sqlite:" + databasePath);
+        try {
+            try (Statement statement = reading.createStatement()) {
+                statement.execute("PRAGMA busy_timeout=" + BUSY_TIMEOUT_MS);
+            }
+            attachArchive(reading, false);
+            try (Statement statement = reading.createStatement()) {
+                statement.execute("PRAGMA query_only=ON");
+            }
+            return reading;
+        } catch (SQLException e) {
+            try {
+                reading.close();
+            } catch (SQLException closeError) {
+                e.addSuppressed(closeError);
+            }
+            throw e;
+        }
     }
 
     public synchronized List<QueuedTransfer> insertQueued(String batchId, String idempotencyKey,
@@ -96,13 +167,16 @@ public final class PayoutStore implements AutoCloseable {
             }
             List<QueuedTransfer> stored = new ArrayList<>(transfers.size());
             try (PreparedStatement row = connection.prepareStatement(
-                    "INSERT INTO transfers(batch_id, destination, amount_nano, comment, status) VALUES (?, ?, ?, ?, 'queued')",
+                    "INSERT INTO transfers(batch_id, destination, amount_nano, comment, status, bounceable, currency) "
+                            + "VALUES (?, ?, ?, ?, 'queued', ?, ?)",
                     Statement.RETURN_GENERATED_KEYS)) {
                 for (Transfer transfer : transfers) {
                     row.setString(1, batchId);
                     row.setString(2, transfer.to());
                     row.setString(3, transfer.amountNano());
                     row.setString(4, transfer.comment());
+                    row.setInt(5, transfer.bounceable() ? 1 : 0);
+                    row.setString(6, transfer.currency());
                     row.executeUpdate();
                     try (ResultSet keys = row.getGeneratedKeys()) {
                         if (!keys.next()) {
@@ -125,9 +199,10 @@ public final class PayoutStore implements AutoCloseable {
         }
     }
 
-    public synchronized IdempotentHit findIdempotent(String idempotencyKey) throws SQLException {
-        IdempotentHit live = readIdempotent("batches", idempotencyKey);
-        return live != null ? live : readIdempotent("archive.batches", idempotencyKey);
+    public IdempotentHit findIdempotent(String idempotencyKey) throws SQLException {
+        Connection reading = reader();
+        IdempotentHit live = readIdempotent(reading, "batches", idempotencyKey);
+        return live != null ? live : readIdempotent(reading, "archive.batches", idempotencyKey);
     }
 
     private static boolean isIdempotencyConstraint(SQLException error) {
@@ -137,7 +212,7 @@ public final class PayoutStore implements AutoCloseable {
 
     public synchronized List<QueuedTransfer> loadQueued() throws SQLException {
         String sql = """
-                SELECT t.id, t.batch_id, t.destination, t.amount_nano, t.comment
+                SELECT t.id, t.batch_id, t.destination, t.amount_nano, t.comment, t.bounceable, t.currency
                 FROM transfers t
                 JOIN batches b ON b.id = t.batch_id
                 WHERE t.status = 'queued' AND b.status IN ('queued', 'sending', 'paused')
@@ -150,7 +225,8 @@ public final class PayoutStore implements AutoCloseable {
                 rows.add(new QueuedTransfer(
                         result.getLong(1),
                         result.getString(2),
-                        new Transfer(result.getString(3), result.getString(4), result.getString(5))));
+                        new Transfer(result.getString(3), result.getString(4), result.getString(5),
+                                result.getInt(6) != 0, result.getString(7))));
             }
         }
         return rows;
@@ -163,9 +239,27 @@ public final class PayoutStore implements AutoCloseable {
         }
     }
 
-    public synchronized Map<String, Object> batchStatus(String batchId) throws SQLException {
-        Map<String, Object> live = readBatch("batches", batchId);
-        return live != null ? live : readBatch("archive.batches", batchId);
+    public Map<String, Object> batchStatus(String batchId) throws SQLException {
+        Connection reading = reader();
+        Map<String, Object> live = readBatch(reading, "batches", batchId);
+        String transferTable = "transfers";
+        if (live == null) {
+            live = readBatch(reading, "archive.batches", batchId);
+            transferTable = "archive.transfers";
+        }
+        if (live == null) {
+            return null;
+        }
+        live.put("transfers", transferRows(reading, transferTable, batchId));
+        return live;
+    }
+
+    public int countQueued() throws SQLException {
+        try (Statement statement = reader().createStatement();
+             ResultSet result = statement.executeQuery(
+                     "SELECT COUNT(*) FROM transfers WHERE status = 'queued'")) {
+            return result.next() ? result.getInt(1) : 0;
+        }
     }
 
     public synchronized boolean isFailed(String batchId) throws SQLException {
@@ -318,8 +412,7 @@ public final class PayoutStore implements AutoCloseable {
                 batch.setString(3, batchId);
                 batch.executeUpdate();
             }
-            connection.commit();
-            return outcome(batchId, !alreadyFailed);
+            return finish(batchId, !alreadyFailed);
         } catch (SQLException e) {
             connection.rollback();
             throw e;
@@ -384,8 +477,7 @@ public final class PayoutStore implements AutoCloseable {
                 transfers.setString(1, batchId);
                 transfers.executeUpdate();
             }
-            connection.commit();
-            return outcome(batchId, changed > 0);
+            return finish(batchId, changed > 0);
         } catch (SQLException e) {
             connection.rollback();
             throw e;
@@ -410,8 +502,7 @@ public final class PayoutStore implements AutoCloseable {
                 transfers.setString(1, batchId);
                 transfers.executeUpdate();
             }
-            connection.commit();
-            return outcome(batchId, changed > 0);
+            return finish(batchId, changed > 0);
         } catch (SQLException e) {
             connection.rollback();
             throw e;
@@ -459,8 +550,7 @@ public final class PayoutStore implements AutoCloseable {
                 transfers.setString(1, batchId);
                 transfers.executeUpdate();
             }
-            connection.commit();
-            return outcome(batchId, changed > 0);
+            return finish(batchId, changed > 0);
         } catch (SQLException e) {
             connection.rollback();
             throw e;
@@ -510,8 +600,7 @@ public final class PayoutStore implements AutoCloseable {
                 transfers.setString(1, batchId);
                 transfers.executeUpdate();
             }
-            connection.commit();
-            return outcome(batchId, changed > 0);
+            return finish(batchId, changed > 0);
         } catch (SQLException e) {
             connection.rollback();
             throw e;
@@ -520,25 +609,81 @@ public final class PayoutStore implements AutoCloseable {
         }
     }
 
-    @Override
-    public synchronized void close() throws SQLException {
-        connection.close();
+    /**
+     * When enabled, {@code confirmed} and {@code failed} are inserted into {@code webhook_events}
+     * before the status transaction commits.
+     */
+    public synchronized void recordWebhooks(boolean enabled) {
+        recordWebhooks = enabled;
     }
 
-    public synchronized void ping() throws SQLException {
-        SQLException failure = null;
-        try (Statement statement = connection.createStatement()) {
-            statement.execute("PRAGMA busy_timeout=" + PING_TIMEOUT_MS);
-            try (ResultSet result = statement.executeQuery("SELECT 1")) {
-                if (!result.next() || result.getInt(1) != 1) {
-                    failure = new SQLException("database ping failed");
+    public synchronized List<WebhookEvent> claimDueWebhooks(long now, int limit) throws SQLException {
+        int bounded = Math.min(100, Math.max(1, limit));
+        List<WebhookEvent> due = new ArrayList<>();
+        try (PreparedStatement statement = connection.prepareStatement(
+                "SELECT id, batch_id, payload, attempts FROM webhook_events "
+                        + "WHERE status = 'pending' AND next_retry_at <= ? ORDER BY id LIMIT ?")) {
+            statement.setLong(1, now);
+            statement.setInt(2, bounded);
+            try (ResultSet result = statement.executeQuery()) {
+                while (result.next()) {
+                    due.add(new WebhookEvent(
+                            result.getLong(1), result.getString(2), result.getString(3), result.getInt(4)));
                 }
             }
-        } catch (SQLException e) {
-            failure = e;
         }
-        try (Statement statement = connection.createStatement()) {
-            statement.execute("PRAGMA busy_timeout=" + BUSY_TIMEOUT_MS);
+        if (due.isEmpty()) {
+            return due;
+        }
+        connection.setAutoCommit(false);
+        try (PreparedStatement update = connection.prepareStatement(
+                "UPDATE webhook_events SET attempts = ?, next_retry_at = ? WHERE id = ? AND status = 'pending'")) {
+            for (int i = 0; i < due.size(); i++) {
+                WebhookEvent event = due.get(i);
+                int attempts = event.attempts() + 1;
+                update.setInt(1, attempts);
+                update.setLong(2, now + WebhookRetry.delayMs(attempts));
+                update.setLong(3, event.id());
+                if (update.executeUpdate() != 1) {
+                    throw new SQLException("webhook event was not pending: " + event.id());
+                }
+                due.set(i, new WebhookEvent(event.id(), event.batchId(), event.payload(), attempts));
+            }
+            connection.commit();
+        } catch (SQLException e) {
+            connection.rollback();
+            throw e;
+        } finally {
+            connection.setAutoCommit(true);
+        }
+        return due;
+    }
+
+    public synchronized void markWebhookDelivered(long id) throws SQLException {
+        try (PreparedStatement statement = connection.prepareStatement(
+                "UPDATE webhook_events SET status = 'delivered' WHERE id = ? AND status = 'pending'")) {
+            statement.setLong(1, id);
+            statement.executeUpdate();
+        }
+    }
+
+    @Override
+    public synchronized void close() throws SQLException {
+        closed = true;
+        SQLException failure = null;
+        synchronized (readerConnections) {
+            for (Connection reading : readerConnections) {
+                try {
+                    reading.close();
+                } catch (SQLException e) {
+                    failure = e;
+                }
+            }
+            readerConnections.clear();
+        }
+        readers.remove();
+        try {
+            connection.close();
         } catch (SQLException e) {
             if (failure == null) {
                 failure = e;
@@ -546,6 +691,21 @@ public final class PayoutStore implements AutoCloseable {
         }
         if (failure != null) {
             throw failure;
+        }
+    }
+
+    public void ping() throws SQLException {
+        if (closed) {
+            throw new SQLException("store is closed");
+        }
+        try (Connection reading = DriverManager.getConnection("jdbc:sqlite:" + databasePath);
+                Statement statement = reading.createStatement()) {
+            statement.execute("PRAGMA busy_timeout=" + PING_TIMEOUT_MS);
+            try (ResultSet result = statement.executeQuery("SELECT 1")) {
+                if (!result.next() || result.getInt(1) != 1) {
+                    throw new SQLException("database ping failed");
+                }
+            }
         }
     }
 
@@ -584,8 +744,8 @@ public final class PayoutStore implements AutoCloseable {
                 batches.executeUpdate();
             }
             try (PreparedStatement transfers = connection.prepareStatement(
-                    "INSERT INTO archive.transfers(id, batch_id, destination, amount_nano, comment, status, archived_at) "
-                            + "SELECT t.id, t.batch_id, t.destination, t.amount_nano, t.comment, t.status, ? "
+                    "INSERT INTO archive.transfers(id, batch_id, destination, amount_nano, comment, status, bounceable, currency, archived_at) "
+                            + "SELECT t.id, t.batch_id, t.destination, t.amount_nano, t.comment, t.status, t.bounceable, t.currency, ? "
                             + "FROM transfers t WHERE t.batch_id IN ("
                             + "SELECT id FROM archive.batches WHERE archived_at = ? AND id IN (" + in + "))")) {
                 transfers.setLong(1, now);
@@ -608,6 +768,11 @@ public final class PayoutStore implements AutoCloseable {
                 deleteBatches.setLong(2, now);
                 bindStrings(deleteBatches, 3, ids);
                 deleted = deleteBatches.executeUpdate();
+            }
+            try (PreparedStatement deleteEvents = connection.prepareStatement(
+                    "DELETE FROM webhook_events WHERE status = 'delivered' AND batch_id IN (" + in + ")")) {
+                bindStrings(deleteEvents, 1, ids);
+                deleteEvents.executeUpdate();
             }
             connection.commit();
             return deleted;
@@ -634,6 +799,50 @@ public final class PayoutStore implements AutoCloseable {
                 : name + "-archive";
         Path parent = absolute.getParent();
         return parent == null ? Path.of(archiveName) : parent.resolve(archiveName);
+    }
+
+    private BatchOutcome finish(String batchId, boolean terminal) throws SQLException {
+        BatchOutcome result = outcome(batchId, terminal);
+        long createdAt = 0;
+        if (result.terminal() && "confirmed".equals(result.status())) {
+            createdAt = createdAt(batchId);
+        }
+        if (recordWebhooks && result.terminal()
+                && ("confirmed".equals(result.status()) || "failed".equals(result.status()))) {
+            insertWebhook(result);
+        }
+        connection.commit();
+        if (createdAt > 0) {
+            EngineMetrics.instance().observedBlock(System.currentTimeMillis() - createdAt);
+        }
+        return result;
+    }
+
+    private long createdAt(String batchId) throws SQLException {
+        try (PreparedStatement statement = connection.prepareStatement(
+                "SELECT created_at FROM batches WHERE id = ?")) {
+            statement.setString(1, batchId);
+            try (ResultSet result = statement.executeQuery()) {
+                return result.next() ? result.getLong(1) : 0;
+            }
+        }
+    }
+
+    private void insertWebhook(BatchOutcome outcome) throws SQLException {
+        Map<String, Object> body = new LinkedHashMap<>();
+        body.put("batchId", outcome.batchId());
+        body.put("status", outcome.status());
+        body.put("count", outcome.count());
+        body.put("txHash", outcome.txHash());
+        body.put("error", outcome.error());
+        try (PreparedStatement statement = connection.prepareStatement(
+                "INSERT INTO webhook_events(batch_id, payload, attempts, next_retry_at, status) "
+                        + "VALUES (?, ?, 0, ?, 'pending')")) {
+            statement.setString(1, outcome.batchId());
+            statement.setString(2, Json.stringify(body));
+            statement.setLong(3, System.currentTimeMillis());
+            statement.executeUpdate();
+        }
     }
 
     private BatchOutcome outcome(String batchId, boolean terminal) throws SQLException {
@@ -720,14 +929,14 @@ public final class PayoutStore implements AutoCloseable {
         }
     }
 
-    private void attachArchive(Path database) throws SQLException {
-        Path archive = archivePath(database);
-        prepareArchive(archive);
-        String sqlPath = archive.toString().replace("'", "''");
-        try (Statement statement = connection.createStatement()) {
+    private void attachArchive(Connection target, boolean configure) throws SQLException {
+        String sqlPath = archivePath(databasePath).toString().replace("'", "''");
+        try (Statement statement = target.createStatement()) {
             statement.execute("ATTACH DATABASE '" + sqlPath + "' AS archive");
-            statement.execute("PRAGMA archive.journal_mode=WAL");
-            statement.execute("PRAGMA archive.synchronous=FULL");
+            if (configure) {
+                statement.execute("PRAGMA archive.journal_mode=WAL");
+                statement.execute("PRAGMA archive.synchronous=FULL");
+            }
         }
     }
 
@@ -766,6 +975,8 @@ public final class PayoutStore implements AutoCloseable {
                         amount_nano TEXT NOT NULL,
                         comment TEXT,
                         status TEXT NOT NULL,
+                        bounceable INTEGER NOT NULL DEFAULT 0,
+                        currency TEXT NOT NULL DEFAULT 'TON',
                         archived_at INTEGER NOT NULL
                     )
                     """);
@@ -784,8 +995,8 @@ public final class PayoutStore implements AutoCloseable {
         }
     }
 
-    private IdempotentHit readIdempotent(String table, String idempotencyKey) throws SQLException {
-        try (PreparedStatement statement = connection.prepareStatement(
+    private IdempotentHit readIdempotent(Connection reading, String table, String idempotencyKey) throws SQLException {
+        try (PreparedStatement statement = reading.prepareStatement(
                 "SELECT id, request_hash, status, total, tx_hash, error FROM " + table
                         + " WHERE idempotency_key = ?")) {
             statement.setString(1, idempotencyKey);
@@ -804,8 +1015,8 @@ public final class PayoutStore implements AutoCloseable {
         }
     }
 
-    private Map<String, Object> readBatch(String table, String batchId) throws SQLException {
-        try (PreparedStatement statement = connection.prepareStatement(
+    private Map<String, Object> readBatch(Connection reading, String table, String batchId) throws SQLException {
+        try (PreparedStatement statement = reading.prepareStatement(
                 "SELECT status, total, tx_hash, error FROM " + table + " WHERE id = ?")) {
             statement.setString(1, batchId);
             try (ResultSet result = statement.executeQuery()) {
@@ -823,9 +1034,33 @@ public final class PayoutStore implements AutoCloseable {
         }
     }
 
+    private List<Map<String, Object>> transferRows(Connection reading, String table, String batchId)
+            throws SQLException {
+        List<Map<String, Object>> rows = new ArrayList<>();
+        try (PreparedStatement statement = reading.prepareStatement(
+                "SELECT destination, amount_nano, status, currency FROM " + table
+                        + " WHERE batch_id = ? ORDER BY id")) {
+            statement.setString(1, batchId);
+            try (ResultSet result = statement.executeQuery()) {
+                while (result.next()) {
+                    Map<String, Object> row = new LinkedHashMap<>();
+                    row.put("to", result.getString(1));
+                    row.put("amount", AmountText.fromNano(result.getString(2), result.getString(4)));
+                    row.put("status", result.getString(3));
+                    rows.add(row);
+                }
+            }
+        }
+        return rows;
+    }
+
     private void addColumn(String name, String definition) throws SQLException {
+        addTransferColumn("batches", name, definition);
+    }
+
+    private void addTransferColumn(String table, String name, String definition) throws SQLException {
         try (Statement statement = connection.createStatement()) {
-            statement.execute("ALTER TABLE batches ADD COLUMN " + name + " " + definition);
+            statement.execute("ALTER TABLE " + table + " ADD COLUMN " + name + " " + definition);
         } catch (SQLException e) {
             String message = e.getMessage() == null ? "" : e.getMessage().toLowerCase();
             if (!message.contains("duplicate column")) {
@@ -844,6 +1079,9 @@ public final class PayoutStore implements AutoCloseable {
     }
 
     public record StuckSending(String batchId, int count, String txHash, int sending, int sent, long updatedAt) {
+    }
+
+    public record WebhookEvent(long id, String batchId, String payload, int attempts) {
     }
 
     public record IdempotentHit(Map<String, Object> status, String requestHash) {

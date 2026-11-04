@@ -8,7 +8,7 @@ import dev.tonpayout.chain.BlockInclusion;
 import dev.tonpayout.chain.ChainLook;
 import dev.tonpayout.chain.MessageHashes;
 import dev.tonpayout.config.EngineConfig;
-import dev.tonpayout.notify.WebhookNotifier;
+import dev.tonpayout.log.BatchMdc;
 import dev.tonpayout.queue.PayoutStore.BatchOutcome;
 import dev.tonpayout.queue.PayoutStore.SentBatch;
 
@@ -21,22 +21,23 @@ public final class TxPoller {
 
     private final EngineConfig config;
     private final PayoutStore store;
-    private final WebhookNotifier webhook;
     private final BlockInclusion inclusion;
     private final SendingRecovery recovery;
     private volatile boolean running;
     private Thread worker;
 
-    public TxPoller(EngineConfig config, PayoutStore store, WebhookNotifier webhook, BlockInclusion inclusion,
-            SendingRecovery recovery) {
+    public TxPoller(EngineConfig config, PayoutStore store, BlockInclusion inclusion, SendingRecovery recovery) {
         this.config = config;
         this.store = store;
-        this.webhook = webhook;
         this.inclusion = inclusion;
         this.recovery = recovery;
     }
 
-    public void start() {
+    public void start() throws Exception {
+        List<BatchOutcome> resolved = recovery.sweep();
+        if (!resolved.isEmpty()) {
+            LOG.info("startup recovery resolved " + resolved.size() + " interrupted sending batches");
+        }
         running = true;
         worker = new Thread(this::loop, "tx-poller");
         worker.setDaemon(true);
@@ -85,6 +86,15 @@ public final class TxPoller {
     }
 
     private void check(SentBatch batch, ChainLook look) throws Exception {
+        BatchMdc.set(batch.batchId());
+        try {
+            checkOne(batch, look);
+        } finally {
+            BatchMdc.clear();
+        }
+    }
+
+    private void checkOne(SentBatch batch, ChainLook look) throws Exception {
         List<String> hashes = MessageHashes.split(batch.txHash());
         if (!hashes.isEmpty()) {
             boolean included;
@@ -96,7 +106,7 @@ public final class TxPoller {
             }
             if (included) {
                 LOG.info("batch " + batch.batchId() + " is in a block");
-                notify(store.markConfirmed(batch.batchId()));
+                store.markConfirmed(batch.batchId());
                 return;
             }
         }
@@ -111,13 +121,6 @@ public final class TxPoller {
                 ? "highload message expired and no message hash was stored; check the wallet history before retrying"
                 : "message was not included in a block before the highload message expired";
         LOG.info("batch " + batch.batchId() + " " + error);
-        notify(store.markNotInBlock(batch.batchId(), error));
-    }
-
-    private void notify(BatchOutcome outcome) {
-        if (!outcome.terminal()) {
-            return;
-        }
-        webhook.batchUpdated(outcome.batchId(), outcome.status(), outcome.count(), outcome.txHash(), outcome.error());
+        store.markNotInBlock(batch.batchId(), error);
     }
 }

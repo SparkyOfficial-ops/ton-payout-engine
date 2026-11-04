@@ -15,6 +15,7 @@ import java.util.logging.Logger;
 
 import dev.tonpayout.config.EngineConfig;
 import dev.tonpayout.json.Json;
+import dev.tonpayout.metrics.EngineMetrics;
 
 /**
  * Looks up the wallet's transactions in TON Center.
@@ -138,17 +139,32 @@ public final class TonCenterBlockInclusion implements BlockInclusion {
         if (!config.tonApiKey().isBlank()) {
             request.header("X-API-Key", config.tonApiKey());
         }
-        HttpResponse<String> response = client.send(request.build(), HttpResponse.BodyHandlers.ofString());
+        HttpResponse<String> response;
+        try {
+            response = client.send(request.build(), HttpResponse.BodyHandlers.ofString());
+        } catch (Exception e) {
+            EngineMetrics.instance().toncenterError();
+            throw e;
+        }
         if (response.statusCode() / 100 != 2) {
+            EngineMetrics.instance().toncenterError();
             throw new IOException("getTransactions HTTP " + response.statusCode());
         }
         String raw = response.body();
-        Map<String, Object> body = Json.asObject(Json.parse(raw));
+        Map<String, Object> body;
+        try {
+            body = Json.asObject(Json.parse(raw));
+        } catch (IllegalArgumentException e) {
+            EngineMetrics.instance().toncenterError();
+            throw new IOException("getTransactions returned invalid JSON", e);
+        }
         if (Boolean.FALSE.equals(body.get("ok"))) {
+            EngineMetrics.instance().toncenterError();
             throw new IOException("getTransactions rejected the request");
         }
         Object result = body.get("result");
         if (!(result instanceof List<?> transactions)) {
+            EngineMetrics.instance().toncenterError();
             throw new IOException("getTransactions result is not a list");
         }
         if (lt == null) {

@@ -1,6 +1,7 @@
 package dev.tonpayout.chain;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -40,6 +41,15 @@ class TonAddressTest {
     void testnetFriendlyAcceptedOnTestnet() {
         String bounceable = friendly(0x91, RAW);
         assertEquals(RAW, TonAddress.canonical(bounceable, "testnet"));
+    }
+
+    @Test
+    void uqAnd0qAreNonBounceable() {
+        assertFalse(TonAddress.bounceable(friendly(0x51, RAW)));
+        assertFalse(TonAddress.bounceable("  " + friendly(0xD1, RAW)));
+        assertTrue(TonAddress.bounceable(friendly(0x11, RAW)));
+        assertTrue(TonAddress.bounceable(friendly(0x91, RAW)));
+        assertTrue(TonAddress.bounceable(RAW));
     }
 
     @Test
