@@ -6,7 +6,7 @@ on:
   pull_request:
 
 env:
-  CTON_SDK_REPO: https://github.com/SparkyOfficial-ops/cton-sdk-main.git
+  CTON_SDK_REPO: https://github.com/SparkyOfficial-ops/cton-sdk.git
   CTON_SDK_REF: main
 
 jobs:
