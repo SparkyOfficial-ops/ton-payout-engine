@@ -3,7 +3,7 @@
 FROM eclipse-temurin:17-jdk-jammy AS build
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends maven cmake g++ libssl-dev git ca-certificates \
+    && apt-get install -y --no-install-recommends maven cmake make g++ libssl-dev git ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
 ARG CTON_SDK_REPO=https://github.com/SparkyOfficial-ops/cton-sdk.git
