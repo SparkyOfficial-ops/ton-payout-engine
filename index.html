@@ -1,0 +1,280 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>ton-payout-engine &mdash; Highload TON Payout Gateway</title>
+  <!-- Bootstrap 3 CDN (classic 2015 style) -->
+  <link rel="stylesheet" href="https://maxcdn.bootstrapcdn.com/bootstrap/3.3.7/css/bootstrap.min.css">
+  <link rel="stylesheet" href="https://maxcdn.bootstrapcdn.com/bootstrap/3.3.7/css/bootstrap-theme.min.css">
+  <style>
+    body { font-family: "Helvetica Neue", Helvetica, Arial, sans-serif; }
+
+    /* ---- Navbar ---- */
+    .navbar-custom { background-color: #1a1a2e; border: none; border-radius: 0; }
+    .navbar-custom .navbar-brand,
+    .navbar-custom .navbar-nav > li > a { color: #e0e0e0; }
+    .navbar-custom .navbar-nav > li > a:hover { color: #ffffff; background-color: #16213e; }
+    .navbar-custom .navbar-nav > .active > a,
+    .navbar-custom .navbar-nav > .active > a:hover { color: #fff; background-color: #0f3460; }
+
+    /* ---- Hero ---- */
+    .jumbotron-hero {
+      background: linear-gradient(135deg, #0f3460 0%, #16213e 60%, #1a1a2e 100%);
+      color: #fff;
+      padding: 70px 30px 60px;
+      margin-bottom: 0;
+      border-radius: 0;
+      text-align: center;
+    }
+    .jumbotron-hero h1 { font-size: 42px; font-weight: 700; letter-spacing: -1px; margin-bottom: 10px; }
+    .jumbotron-hero p  { font-size: 18px; color: #b0c4de; max-width: 680px; margin: 10px auto 30px; }
+    .btn-download {
+      background-color: #e94560;
+      border-color: #c73652;
+      color: #fff;
+      font-size: 16px;
+      padding: 12px 32px;
+    }
+    .btn-download:hover, .btn-download:focus { background-color: #c73652; color: #fff; }
+    .btn-download .glyphicon { margin-right: 8px; }
+
+    /* ---- Sections ---- */
+    .section-alt { background-color: #f9f9f9; }
+    .section-pad { padding: 50px 0; }
+    .section-title { font-size: 28px; font-weight: 700; margin-bottom: 30px; color: #1a1a2e; }
+
+    /* ---- Feature icons ---- */
+    .feature-box { text-align: center; padding: 20px 10px; }
+    .feature-box .glyphicon { font-size: 42px; color: #0f3460; margin-bottom: 15px; }
+    .feature-box h4 { font-weight: 700; }
+
+    /* ---- Badge pills ---- */
+    .badge-row a { margin: 3px 2px; display: inline-block; }
+
+    /* ---- Footer ---- */
+    .site-footer { background-color: #1a1a2e; color: #888; padding: 25px 0; font-size: 13px; text-align: center; }
+    .site-footer a { color: #aaa; }
+    .site-footer a:hover { color: #fff; }
+  </style>
+</head>
+<body>
+
+<!-- Navbar -->
+<nav class="navbar navbar-custom navbar-static-top" role="navigation">
+  <div class="container">
+    <div class="navbar-header">
+      <button type="button" class="navbar-toggle collapsed" data-toggle="collapse" data-target="#navbar-main">
+        <span class="sr-only">Toggle navigation</span>
+        <span class="icon-bar"></span><span class="icon-bar"></span><span class="icon-bar"></span>
+      </button>
+      <a class="navbar-brand" href="index.html">
+        <span class="glyphicon glyphicon-send"></span> ton-payout-engine
+      </a>
+    </div>
+    <div class="collapse navbar-collapse" id="navbar-main">
+      <ul class="nav navbar-nav navbar-right">
+        <li class="active"><a href="index.html">Overview</a></li>
+        <li><a href="quickstart.html">Quick Start</a></li>
+        <li><a href="api.html">API</a></li>
+        <li><a href="https://github.com/SparkyOfficial-ops/ton-payout-engine" target="_blank">
+          <span class="glyphicon glyphicon-new-window"></span> GitHub
+        </a></li>
+      </ul>
+    </div>
+  </div>
+</nav>
+
+<!-- Hero -->
+<div class="jumbotron-hero">
+  <div class="container">
+    <h1><span class="glyphicon glyphicon-send"></span> ton-payout-engine</h1>
+    <p>Highload TON payout gateway. Sends batches of up to 254 transfers in a single Highload Wallet v2 transaction. Built on <strong>cton-sdk</strong> &mdash; Java 17, zero frameworks.</p>
+    <a href="dist/ton-payout-engine-1.0.0-fat.jar" class="btn btn-download btn-lg">
+      <span class="glyphicon glyphicon-download-alt"></span>
+      Download JAR &nbsp;<span class="label label-default">v1.0.0</span>
+    </a>
+    &nbsp;
+    <a href="https://github.com/SparkyOfficial-ops/ton-payout-engine" class="btn btn-default btn-lg" target="_blank">
+      <span class="glyphicon glyphicon-align-left"></span> Source
+    </a>
+    <br><br>
+    <div class="badge-row">
+      <a href="https://github.com/SparkyOfficial-ops/ton-payout-engine/actions"><img src="https://img.shields.io/github/actions/workflow/status/SparkyOfficial-ops/ton-payout-engine/ci.yml?branch=main&label=CI&style=flat-square" alt="CI"></a>
+      <a href="https://github.com/SparkyOfficial-ops/ton-payout-engine/releases"><img src="https://img.shields.io/github/v/release/SparkyOfficial-ops/ton-payout-engine?style=flat-square" alt="Release"></a>
+      <a href="#"><img src="https://img.shields.io/badge/Java-17-orange?style=flat-square" alt="Java 17"></a>
+      <a href="#"><img src="https://img.shields.io/badge/TON-Highload%20v2-blue?style=flat-square" alt="TON"></a>
+      <a href="https://github.com/SparkyOfficial-ops/ton-payout-engine/pkgs/container/ton-payout-engine"><img src="https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker" alt="Docker"></a>
+    </div>
+  </div>
+</div>
+
+<!-- Features -->
+<div class="section-pad">
+  <div class="container">
+    <div class="row">
+      <div class="col-sm-3">
+        <div class="feature-box">
+          <div class="glyphicon glyphicon-flash"></div>
+          <h4>Highload Wallet v2</h4>
+          <p>Up to 254 transfers in one transaction. Signed locally via <code>cton-sdk</code> native library.</p>
+        </div>
+      </div>
+      <div class="col-sm-3">
+        <div class="feature-box">
+          <div class="glyphicon glyphicon-time"></div>
+          <h4>Batch Window</h4>
+          <p>Collects requests for <code>BATCH_WINDOW_MS</code> (default 2500 ms) before sending, reducing fees.</p>
+        </div>
+      </div>
+      <div class="col-sm-3">
+        <div class="feature-box">
+          <div class="glyphicon glyphicon-ok-sign"></div>
+          <h4>Idempotency</h4>
+          <p>Pass <code>X-Idempotency-Key</code> on every request. Duplicate calls return the same batch status.</p>
+        </div>
+      </div>
+      <div class="col-sm-3">
+        <div class="feature-box">
+          <div class="glyphicon glyphicon-usd"></div>
+          <h4>TON &amp; USDT</h4>
+          <p>Native TON transfers or Jetton USDT with auto-computed gas. Set <code>currency: USDT</code> in the request.</p>
+        </div>
+      </div>
+    </div>
+
+    <div class="row" style="margin-top:20px;">
+      <div class="col-sm-3">
+        <div class="feature-box">
+          <div class="glyphicon glyphicon-repeat"></div>
+          <h4>Auto-retry</h4>
+          <p>Same signed bytes retried on 5xx / 429 / timeouts. No re-sign, no double-spend.</p>
+        </div>
+      </div>
+      <div class="col-sm-3">
+        <div class="feature-box">
+          <div class="glyphicon glyphicon-bell"></div>
+          <h4>Webhooks</h4>
+          <p>Persistent outbox delivers <code>sent</code>, <code>confirmed</code>, <code>failed</code> events with exponential back-off.</p>
+        </div>
+      </div>
+      <div class="col-sm-3">
+        <div class="feature-box">
+          <div class="glyphicon glyphicon-stats"></div>
+          <h4>OpenMetrics</h4>
+          <p><code>GET /metrics</code> exposes queue size, wallet balance, batch latency histogram and error counter.</p>
+        </div>
+      </div>
+      <div class="col-sm-3">
+        <div class="feature-box">
+          <div class="glyphicon glyphicon-hdd"></div>
+          <h4>SQLite + Archive</h4>
+          <p>All batches persist in SQLite. Records older than 30 days move to <code>payout-archive.db</code> automatically.</p>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- How it works -->
+<div class="section-pad section-alt">
+  <div class="container">
+    <h2 class="section-title text-center">How it works</h2>
+    <div class="row">
+      <div class="col-md-8 col-md-offset-2">
+        <ol class="list-group" style="counter-reset:step;">
+          <li class="list-group-item">
+            <span class="badge" style="background:#0f3460;">1</span>
+            Your bot calls <code>POST /api/v1/payout</code> with an array of transfers and a unique <code>X-Idempotency-Key</code>.
+          </li>
+          <li class="list-group-item">
+            <span class="badge" style="background:#0f3460;">2</span>
+            Transfers are validated (address format, testnet bit on mainnet, USDT wallet present) and written to SQLite as <code>queued</code>.
+          </li>
+          <li class="list-group-item">
+            <span class="badge" style="background:#0f3460;">3</span>
+            The batch window (<code>BATCH_WINDOW_MS</code>) accumulates concurrent requests, then signs one Highload Wallet v2 external message.
+          </li>
+          <li class="list-group-item">
+            <span class="badge" style="background:#0f3460;">4</span>
+            Signed bytes are sent to TON Center <code>sendBoc</code>. Status becomes <code>sent</code>; a webhook fires immediately.
+          </li>
+          <li class="list-group-item">
+            <span class="badge" style="background:#0f3460;">5</span>
+            After <code>CONFIRM_DELAY_MS</code> (default 12 s) the poller walks <code>getTransactions</code> pages until it finds the message hash. Status becomes <code>confirmed</code>.
+          </li>
+          <li class="list-group-item">
+            <span class="badge" style="background:#0f3460;">6</span>
+            Webhook outbox delivers the final event. Records are archived after 30 days.
+          </li>
+        </ol>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Download -->
+<div class="section-pad">
+  <div class="container">
+    <h2 class="section-title text-center">Downloads &mdash; v1.0.0</h2>
+    <div class="row">
+      <div class="col-sm-6 col-sm-offset-3">
+        <table class="table table-bordered table-hover">
+          <thead><tr><th>File</th><th>Description</th><th></th></tr></thead>
+          <tbody>
+            <tr>
+              <td><code>ton-payout-engine-1.0.0-fat.jar</code></td>
+              <td>Executable fat-JAR (all deps bundled)</td>
+              <td><a href="dist/ton-payout-engine-1.0.0-fat.jar" class="btn btn-sm btn-primary">
+                <span class="glyphicon glyphicon-download-alt"></span> Download
+              </a></td>
+            </tr>
+            <tr>
+              <td>Docker image</td>
+              <td>
+                <code>ghcr.io/sparkyofficial-ops/ton-payout-engine:v1.0.0</code><br>
+                <small class="text-muted">also tagged <code>:latest</code> and <code>:&lt;commit-sha&gt;</code></small>
+              </td>
+              <td><a href="https://github.com/SparkyOfficial-ops/ton-payout-engine/pkgs/container/ton-payout-engine" class="btn btn-sm btn-default" target="_blank">
+                <span class="glyphicon glyphicon-new-window"></span> GHCR
+              </a></td>
+            </tr>
+            <tr>
+              <td>Source code</td>
+              <td>ZIP / TAR.GZ on GitHub Releases</td>
+              <td><a href="https://github.com/SparkyOfficial-ops/ton-payout-engine/releases/tag/v1.0.0" class="btn btn-sm btn-default" target="_blank">
+                <span class="glyphicon glyphicon-new-window"></span> Release
+              </a></td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+    <div class="row">
+      <div class="col-sm-6 col-sm-offset-3">
+        <div class="alert alert-info">
+          <span class="glyphicon glyphicon-info-sign"></span>
+          Requires <strong>Java 17+</strong>. The fat-JAR bundles all Maven dependencies. The native
+          <code>cton-sdk-core</code> library is extracted automatically at startup.
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Footer -->
+<footer class="site-footer">
+  <div class="container">
+    <p>
+      ton-payout-engine v1.0.0 &mdash;
+      <a href="https://github.com/SparkyOfficial-ops/ton-payout-engine">GitHub</a> &mdash;
+      Released under the MIT License
+    </p>
+  </div>
+</footer>
+
+<script src="https://ajax.googleapis.com/ajax/libs/jquery/1.12.4/jquery.min.js"></script>
+<script src="https://maxcdn.bootstrapcdn.com/bootstrap/3.3.7/js/bootstrap.min.js"></script>
+</body>
+</html>

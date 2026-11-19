@@ -1,0 +1,372 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>API Reference &mdash; ton-payout-engine</title>
+  <link rel="stylesheet" href="https://maxcdn.bootstrapcdn.com/bootstrap/3.3.7/css/bootstrap.min.css">
+  <link rel="stylesheet" href="https://maxcdn.bootstrapcdn.com/bootstrap/3.3.7/css/bootstrap-theme.min.css">
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/9.12.0/styles/tomorrow-night.min.css">
+  <style>
+    body { font-family: "Helvetica Neue", Helvetica, Arial, sans-serif; }
+    .navbar-custom { background-color: #1a1a2e; border: none; border-radius: 0; }
+    .navbar-custom .navbar-brand,
+    .navbar-custom .navbar-nav > li > a { color: #e0e0e0; }
+    .navbar-custom .navbar-nav > li > a:hover { color: #fff; background-color: #16213e; }
+    .navbar-custom .navbar-nav > .active > a,
+    .navbar-custom .navbar-nav > .active > a:hover { color: #fff; background-color: #0f3460; }
+
+    .page-header-custom { background: #0f3460; color: #fff; padding: 40px 0 30px; }
+    .page-header-custom h1 { margin-top: 0; }
+    .page-header-custom p { color: #b0c4de; }
+
+    .section-pad { padding: 40px 0; }
+    .section-alt { background-color: #f9f9f9; }
+
+    /* Endpoint cards */
+    .endpoint-card { margin-bottom: 30px; }
+    .endpoint-title {
+      font-size: 17px;
+      font-weight: 700;
+      padding: 10px 16px;
+      border-radius: 4px 4px 0 0;
+      border-bottom: 1px solid #ddd;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+    .endpoint-body { padding: 16px; border: 1px solid #ddd; border-top: none; border-radius: 0 0 4px 4px; }
+    .label-method { font-size: 13px; padding: 4px 10px; font-weight: 700; letter-spacing: 0.5px; }
+    .method-post { background-color: #5cb85c; }
+    .method-get  { background-color: #337ab7; }
+
+    pre { background: #282c34; color: #abb2bf; border-radius: 4px; border: none; font-size: 13px; padding: 16px; }
+    code { background: #eef; padding: 2px 5px; border-radius: 3px; font-size: 92%; }
+
+    .status-badge { font-size: 12px; font-weight: 700; padding: 3px 8px; border-radius: 3px; color: #fff; }
+    .s-queued   { background: #777; }
+    .s-sending  { background: #f0ad4e; color: #333; }
+    .s-paused   { background: #d9534f; }
+    .s-sent     { background: #5bc0de; color: #333; }
+    .s-confirmed{ background: #5cb85c; }
+    .s-failed   { background: #d9534f; }
+
+    .site-footer { background-color: #1a1a2e; color: #888; padding: 25px 0; font-size: 13px; text-align: center; }
+    .site-footer a { color: #aaa; }
+    .site-footer a:hover { color: #fff; }
+
+    /* Sidebar TOC */
+    .toc-sidebar { position: sticky; top: 20px; }
+    .toc-sidebar ul { list-style: none; padding-left: 0; }
+    .toc-sidebar ul li a { color: #333; display: block; padding: 4px 8px; border-left: 3px solid transparent; }
+    .toc-sidebar ul li a:hover { border-left-color: #0f3460; color: #0f3460; text-decoration: none; }
+    .toc-sidebar ul li a.active { border-left-color: #0f3460; color: #0f3460; font-weight: 700; }
+
+    @media (max-width: 991px) { .toc-sidebar { display: none; } }
+  </style>
+</head>
+<body>
+
+<nav class="navbar navbar-custom navbar-static-top" role="navigation">
+  <div class="container">
+    <div class="navbar-header">
+      <button type="button" class="navbar-toggle collapsed" data-toggle="collapse" data-target="#navbar-main">
+        <span class="sr-only">Toggle navigation</span>
+        <span class="icon-bar"></span><span class="icon-bar"></span><span class="icon-bar"></span>
+      </button>
+      <a class="navbar-brand" href="index.html">
+        <span class="glyphicon glyphicon-send"></span> ton-payout-engine
+      </a>
+    </div>
+    <div class="collapse navbar-collapse" id="navbar-main">
+      <ul class="nav navbar-nav navbar-right">
+        <li><a href="index.html">Overview</a></li>
+        <li><a href="quickstart.html">Quick Start</a></li>
+        <li class="active"><a href="api.html">API</a></li>
+        <li><a href="https://github.com/SparkyOfficial-ops/ton-payout-engine" target="_blank">
+          <span class="glyphicon glyphicon-new-window"></span> GitHub
+        </a></li>
+      </ul>
+    </div>
+  </div>
+</nav>
+
+<div class="page-header-custom">
+  <div class="container">
+    <h1><span class="glyphicon glyphicon-book"></span> API Reference</h1>
+    <p>Base URL: <code>http://&lt;host&gt;:8080</code> &nbsp;&nbsp; Auth header: <code>X-Api-Key: &lt;PAYOUT_API_KEY&gt;</code></p>
+  </div>
+</div>
+
+<div class="section-pad">
+  <div class="container">
+    <div class="row">
+
+      <!-- Sidebar -->
+      <div class="col-md-3">
+        <div class="toc-sidebar">
+          <p class="text-muted" style="font-size:12px;text-transform:uppercase;letter-spacing:1px;margin-bottom:8px;">Endpoints</p>
+          <ul>
+            <li><a href="#post-payout">POST /api/v1/payout</a></li>
+            <li><a href="#get-status">GET /api/v1/status/{batchId}</a></li>
+            <li><a href="#get-balance">GET /api/v1/balance</a></li>
+            <li><a href="#post-recovery">POST /api/v1/recovery</a></li>
+            <li><a href="#get-health">GET /health</a></li>
+            <li><a href="#get-metrics">GET /metrics</a></li>
+          </ul>
+          <hr>
+          <p class="text-muted" style="font-size:12px;text-transform:uppercase;letter-spacing:1px;margin-bottom:8px;">Reference</p>
+          <ul>
+            <li><a href="#batch-statuses">Batch statuses</a></li>
+            <li><a href="#address-formats">Address formats</a></li>
+            <li><a href="#webhooks">Webhooks</a></li>
+            <li><a href="#errors">Error codes</a></li>
+          </ul>
+        </div>
+      </div>
+
+      <!-- Content -->
+      <div class="col-md-9">
+
+        <!-- POST /payout -->
+        <div class="endpoint-card panel panel-default" id="post-payout">
+          <div class="endpoint-title panel-heading">
+            <span class="label label-method method-post">POST</span>
+            <code>/api/v1/payout</code>
+            &mdash; Submit a batch of transfers
+          </div>
+          <div class="endpoint-body panel-body">
+            <p>Creates a batch. Transfers are validated, written to SQLite as <code>queued</code>, and collected in the batch window before signing.</p>
+
+            <h5>Required headers</h5>
+            <table class="table table-condensed table-bordered">
+              <tr><th>Header</th><th>Description</th></tr>
+              <tr><td><code>X-Api-Key</code></td><td>API key (required on all endpoints except <code>/health</code> and <code>/metrics</code>)</td></tr>
+              <tr><td><code>X-Idempotency-Key</code></td><td>Unique string per operation. Same key + same body = same batch, no duplicate. Same key + different body = <code>409</code>.</td></tr>
+              <tr><td><code>Content-Type</code></td><td><code>application/json</code></td></tr>
+            </table>
+
+            <h5>Request body</h5>
+            <pre><code class="json">{
+  "transfers": [
+    {
+      "to":       "EQAbcdef...",   // TON address (required)
+      "amount":   "5.0",           // decimal TON or USDT (mutually exclusive with amountNano)
+      "amountNano": 5000000000,    // nanoTON or USDT base units (mutually exclusive with amount)
+      "comment":  "reward",        // optional text comment
+      "currency": "TON"            // "TON" (default) or "USDT"
+    }
+  ]
+}</code></pre>
+
+            <h5>Constraints</h5>
+            <ul>
+              <li>Maximum <strong>254 transfers</strong> per request (Highload Wallet v2 limit). Exceeding returns <code>400</code>.</li>
+              <li>USDT transfers require <code>USDT_JETTON_WALLET</code> to be set; otherwise <code>400</code>.</li>
+              <li>Testnet addresses (<code>kQ…</code> / <code>0Q…</code>) on mainnet return <code>400</code>.</li>
+              <li>USDT <code>amount</code> accepts at most 6 decimal places.</li>
+            </ul>
+
+            <h5>Response <code>202 Accepted</code></h5>
+            <pre><code class="json">{
+  "batchId": "7f3a2c1e-4b56-4e89-a1f2-123456789abc",
+  "status": "queued"
+}</code></pre>
+          </div>
+        </div>
+
+        <!-- GET /status -->
+        <div class="endpoint-card panel panel-default" id="get-status">
+          <div class="endpoint-title panel-heading">
+            <span class="label label-method method-get">GET</span>
+            <code>/api/v1/status/{batchId}</code>
+            &mdash; Batch status
+          </div>
+          <div class="endpoint-body panel-body">
+            <p>Returns the current status of a batch, plus per-transfer details.</p>
+            <h5>Response <code>200 OK</code></h5>
+            <pre><code class="json">{
+  "batchId":   "7f3a2c1e-...",
+  "status":    "confirmed",
+  "txHash":    "a1b2c3d4...",
+  "createdAt": "2025-07-01T12:00:00Z",
+  "sentAt":    "2025-07-01T12:00:03Z",
+  "transfers": [
+    { "to": "EQAbc...", "amount": "5.0", "currency": "TON", "status": "confirmed" },
+    { "to": "EQDef...", "amount": "2.0", "currency": "TON", "status": "confirmed" }
+  ]
+}</code></pre>
+            <p>Returns <code>404</code> if the batchId is unknown. If the batch was archived, it is retrieved from <code>payout-archive.db</code> transparently.</p>
+          </div>
+        </div>
+
+        <!-- GET /balance -->
+        <div class="endpoint-card panel panel-default" id="get-balance">
+          <div class="endpoint-title panel-heading">
+            <span class="label label-method method-get">GET</span>
+            <code>/api/v1/balance</code>
+            &mdash; Wallet balance
+          </div>
+          <div class="endpoint-body panel-body">
+            <pre><code class="json">{
+  "address":    "EQxxx...",
+  "balanceNano": 50000000000,
+  "balance":    "50.0"
+}</code></pre>
+          </div>
+        </div>
+
+        <!-- POST /recovery -->
+        <div class="endpoint-card panel panel-default" id="post-recovery">
+          <div class="endpoint-title panel-heading">
+            <span class="label label-method method-post">POST</span>
+            <code>/api/v1/recovery</code>
+            &mdash; Trigger manual recovery sweep
+          </div>
+          <div class="endpoint-body panel-body">
+            <p>Runs the same sweep as startup: checks all <code>sending</code> batches older than 5 minutes against the chain. Batches already in a block become <code>confirmed</code>; expired ones become <code>failed</code>.</p>
+            <p>No request body required. Returns <code>200</code> with a summary.</p>
+            <pre><code class="json">{ "swept": 2, "confirmed": 1, "failed": 1 }</code></pre>
+          </div>
+        </div>
+
+        <!-- GET /health -->
+        <div class="endpoint-card panel panel-default" id="get-health">
+          <div class="endpoint-title panel-heading">
+            <span class="label label-method method-get">GET</span>
+            <code>/health</code>
+            &mdash; Liveness / readiness probe
+          </div>
+          <div class="endpoint-body panel-body">
+            <p>No auth required. Returns <code>200</code> when SQLite responds and the wallet key file is present. Returns <code>503</code> otherwise (Docker / Kubernetes stops routing traffic).</p>
+            <pre><code class="json">{ "status": "UP" }</code></pre>
+          </div>
+        </div>
+
+        <!-- GET /metrics -->
+        <div class="endpoint-card panel panel-default" id="get-metrics">
+          <div class="endpoint-title panel-heading">
+            <span class="label label-method method-get">GET</span>
+            <code>/metrics</code>
+            &mdash; OpenMetrics
+          </div>
+          <div class="endpoint-body panel-body">
+            <p>No auth required. Prometheus-compatible text format.</p>
+            <pre><code class="text"># HELP payout_queue_size Number of queued transfers
+# TYPE payout_queue_size gauge
+payout_queue_size 12
+
+# HELP wallet_balance_nano Current wallet balance in nanoTON
+# TYPE wallet_balance_nano gauge
+wallet_balance_nano 50000000000
+
+# HELP batch_processing_duration_seconds Time from batch receipt to block confirmation
+# TYPE batch_processing_duration_seconds histogram
+batch_processing_duration_seconds_bucket{le="5"} 4
+batch_processing_duration_seconds_bucket{le="15"} 11
+batch_processing_duration_seconds_bucket{le="+Inf"} 12
+batch_processing_duration_seconds_sum 142.5
+batch_processing_duration_seconds_count 12
+
+# HELP toncenter_errors_total TON Center API error count
+# TYPE toncenter_errors_total counter
+toncenter_errors_total 3</code></pre>
+          </div>
+        </div>
+
+        <!-- Batch Statuses -->
+        <h3 id="batch-statuses">Batch Statuses</h3>
+        <table class="table table-bordered">
+          <thead><tr><th>Status</th><th>Meaning</th></tr></thead>
+          <tbody>
+            <tr><td><span class="status-badge s-queued">queued</span></td><td>Saved to DB, waiting for the batch window to close.</td></tr>
+            <tr><td><span class="status-badge s-sending">sending</span></td><td>Signing started. Bytes may already be in-flight.</td></tr>
+            <tr><td><span class="status-badge s-paused">paused</span></td><td>Wallet balance too low. Retried after <code>PAUSE_RETRY_MS</code>. Alert sent to <code>ALERT_URL</code>.</td></tr>
+            <tr><td><span class="status-badge s-sent">sent</span></td><td>TON Center accepted the bytes into the mempool.</td></tr>
+            <tr><td><span class="status-badge s-confirmed">confirmed</span></td><td>Message hash found in <code>getTransactions</code>. Final success.</td></tr>
+            <tr><td><span class="status-badge s-failed">failed</span></td><td><code>MESSAGE_TTL_MS</code> elapsed without confirmation. Retry with a new <code>X-Idempotency-Key</code>.</td></tr>
+          </tbody>
+        </table>
+
+        <!-- Address formats -->
+        <h3 id="address-formats" style="margin-top:30px;">Address Formats</h3>
+        <p>The engine accepts addresses in these forms:</p>
+        <table class="table table-bordered table-condensed">
+          <thead><tr><th>Format</th><th>Example</th><th>Notes</th></tr></thead>
+          <tbody>
+            <tr><td>User-friendly base64url (bounceable)</td><td><code>EQAbc...</code></td><td>Standard. CRC16 validated.</td></tr>
+            <tr><td>User-friendly base64url (non-bounceable)</td><td><code>UQAbc...</code></td><td>Accepted.</td></tr>
+            <tr><td>Raw <code>workchain:64hex</code></td><td><code>0:1234...abcd</code></td><td>Workchain −128 to 127.</td></tr>
+            <tr><td>Testnet bounceable / non-bounceable</td><td><code>kQA...</code> / <code>0QA...</code></td><td><strong>Rejected on mainnet</strong> → <code>400</code>.</td></tr>
+          </tbody>
+        </table>
+
+        <!-- Webhooks -->
+        <h3 id="webhooks" style="margin-top:30px;">Webhooks</h3>
+        <p>Set <code>WEBHOOK_URL</code> to receive batch events. The engine uses a persistent outbox: if delivery fails, it retries at 5 s, 30 s, 2 min, then every 10 min until <code>2xx</code>.</p>
+        <p>Events: <code>sent</code> (fires immediately), <code>confirmed</code>, <code>failed</code>.</p>
+        <pre><code class="json">POST &lt;WEBHOOK_URL&gt;
+Content-Type: application/json
+
+{
+  "batchId": "7f3a2c1e-...",
+  "status":  "confirmed",
+  "count":   2,
+  "txHash":  "a1b2c3d4...",
+  "error":   null
+}</code></pre>
+        <p>Your endpoint must respond <code>2xx</code>. Any other response triggers a retry. The same event may be delivered more than once if the process restarts between receipt and the <code>delivered</code> mark — make your handler idempotent.</p>
+
+        <!-- Error codes -->
+        <h3 id="errors" style="margin-top:30px;">Error Codes</h3>
+        <table class="table table-bordered">
+          <thead><tr><th>HTTP</th><th>Situation</th></tr></thead>
+          <tbody>
+            <tr><td><span class="label label-danger">400</span></td><td>Invalid address, testnet address on mainnet, missing USDT wallet, batch > 254, bad JSON.</td></tr>
+            <tr><td><span class="label label-warning">401</span></td><td>Missing or wrong <code>X-Api-Key</code>.</td></tr>
+            <tr><td><span class="label label-danger">404</span></td><td>Unknown <code>batchId</code>.</td></tr>
+            <tr><td><span class="label label-danger">409</span></td><td>Same <code>X-Idempotency-Key</code>, different request body.</td></tr>
+            <tr><td><span class="label label-danger">429</span></td><td>TON Center rate limit (retried internally, not surfaced to caller).</td></tr>
+            <tr><td><span class="label label-danger">503</span></td><td>Health check failed (SQLite unavailable or key file missing).</td></tr>
+          </tbody>
+        </table>
+
+      </div><!-- /col-md-9 -->
+    </div><!-- /row -->
+  </div><!-- /container -->
+</div>
+
+<footer class="site-footer">
+  <div class="container">
+    <p>
+      ton-payout-engine v1.0.0 &mdash;
+      <a href="https://github.com/SparkyOfficial-ops/ton-payout-engine">GitHub</a> &mdash;
+      Released under the MIT License
+    </p>
+  </div>
+</footer>
+
+<script src="https://ajax.googleapis.com/ajax/libs/jquery/1.12.4/jquery.min.js"></script>
+<script src="https://maxcdn.bootstrapcdn.com/bootstrap/3.3.7/js/bootstrap.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/9.12.0/highlight.min.js"></script>
+<script>
+  hljs.initHighlightingOnLoad();
+
+  // Highlight active TOC link on scroll
+  $(window).on('scroll', function () {
+    var scrollTop = $(this).scrollTop() + 80;
+    $('.toc-sidebar a').each(function () {
+      var id = $(this).attr('href');
+      if (!id || id.charAt(0) !== '#') return;
+      var el = $(id);
+      if (!el.length) return;
+      if (el.offset().top <= scrollTop) {
+        $('.toc-sidebar a').removeClass('active');
+        $(this).addClass('active');
+      }
+    });
+  });
+</script>
+</body>
+</html>

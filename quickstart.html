@@ -1,0 +1,232 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Quick Start &mdash; ton-payout-engine</title>
+  <link rel="stylesheet" href="https://maxcdn.bootstrapcdn.com/bootstrap/3.3.7/css/bootstrap.min.css">
+  <link rel="stylesheet" href="https://maxcdn.bootstrapcdn.com/bootstrap/3.3.7/css/bootstrap-theme.min.css">
+  <!-- Highlight.js for code blocks -->
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/9.12.0/styles/tomorrow-night.min.css">
+  <style>
+    body { font-family: "Helvetica Neue", Helvetica, Arial, sans-serif; }
+    .navbar-custom { background-color: #1a1a2e; border: none; border-radius: 0; }
+    .navbar-custom .navbar-brand,
+    .navbar-custom .navbar-nav > li > a { color: #e0e0e0; }
+    .navbar-custom .navbar-nav > li > a:hover { color: #fff; background-color: #16213e; }
+    .navbar-custom .navbar-nav > .active > a,
+    .navbar-custom .navbar-nav > .active > a:hover { color: #fff; background-color: #0f3460; }
+
+    .page-header-custom {
+      background: #0f3460;
+      color: #fff;
+      padding: 40px 0 30px;
+      margin-bottom: 0;
+    }
+    .page-header-custom h1 { margin-top: 0; }
+    .page-header-custom p { color: #b0c4de; }
+
+    .section-pad { padding: 40px 0; }
+    .section-alt { background-color: #f9f9f9; }
+    .step-num {
+      display: inline-block;
+      width: 32px; height: 32px;
+      line-height: 32px;
+      text-align: center;
+      border-radius: 50%;
+      background-color: #0f3460;
+      color: #fff;
+      font-weight: 700;
+      margin-right: 10px;
+    }
+    h3.step { font-size: 20px; font-weight: 700; margin-top: 30px; margin-bottom: 10px; }
+    pre { background: #282c34; color: #abb2bf; border-radius: 4px; border: none; font-size: 13px; padding: 16px; }
+    code { background: #eef; padding: 2px 5px; border-radius: 3px; font-size: 92%; }
+    .well-var { background: #fff9e6; border-color: #f0ad4e; }
+
+    .site-footer { background-color: #1a1a2e; color: #888; padding: 25px 0; font-size: 13px; text-align: center; }
+    .site-footer a { color: #aaa; }
+    .site-footer a:hover { color: #fff; }
+  </style>
+</head>
+<body>
+
+<nav class="navbar navbar-custom navbar-static-top" role="navigation">
+  <div class="container">
+    <div class="navbar-header">
+      <button type="button" class="navbar-toggle collapsed" data-toggle="collapse" data-target="#navbar-main">
+        <span class="sr-only">Toggle navigation</span>
+        <span class="icon-bar"></span><span class="icon-bar"></span><span class="icon-bar"></span>
+      </button>
+      <a class="navbar-brand" href="index.html">
+        <span class="glyphicon glyphicon-send"></span> ton-payout-engine
+      </a>
+    </div>
+    <div class="collapse navbar-collapse" id="navbar-main">
+      <ul class="nav navbar-nav navbar-right">
+        <li><a href="index.html">Overview</a></li>
+        <li class="active"><a href="quickstart.html">Quick Start</a></li>
+        <li><a href="api.html">API</a></li>
+        <li><a href="https://github.com/SparkyOfficial-ops/ton-payout-engine" target="_blank">
+          <span class="glyphicon glyphicon-new-window"></span> GitHub
+        </a></li>
+      </ul>
+    </div>
+  </div>
+</nav>
+
+<div class="page-header-custom">
+  <div class="container">
+    <h1><span class="glyphicon glyphicon-road"></span> Quick Start</h1>
+    <p>Get ton-payout-engine running locally or in Docker in under 5 minutes.</p>
+  </div>
+</div>
+
+<div class="section-pad">
+  <div class="container">
+
+    <!-- Prerequisites -->
+    <h2><span class="glyphicon glyphicon-list-alt"></span> Prerequisites</h2>
+    <ul>
+      <li>Java 17+</li>
+      <li>Maven 3.8+ (for building from source)</li>
+      <li>A Highload Wallet v2 address and its Ed25519 key file (32 raw bytes, hex, base64, or mnemonic)</li>
+      <li>A <a href="https://toncenter.com/" target="_blank">TON Center</a> API key</li>
+    </ul>
+
+    <!-- Option A: JAR -->
+    <h2 style="margin-top:30px;"><span class="glyphicon glyphicon-download-alt"></span> Option A &mdash; Run the fat-JAR</h2>
+
+    <h3 class="step"><span class="step-num">1</span> Download</h3>
+    <p>Grab the latest fat-JAR from <a href="index.html#downloads">the Downloads page</a> or directly from GitHub Releases:</p>
+    <pre><code class="bash">wget https://github.com/SparkyOfficial-ops/ton-payout-engine/releases/download/v1.0.0/ton-payout-engine-1.0.0-fat.jar</code></pre>
+
+    <h3 class="step"><span class="step-num">2</span> Create the environment file</h3>
+    <div class="well well-var">
+      <strong>Never commit secrets.</strong> Copy <code>.env.example</code> and fill in your values.
+    </div>
+    <pre><code class="bash">cp .env.example .env
+# Edit .env:</code></pre>
+    <pre><code class="ini">WALLET_ADDRESS=EQxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+WALLET_KEY_PATH=/path/to/wallet.key
+PAYOUT_API_KEY=your-secret-api-key
+TON_API_KEY=your-toncenter-key
+PAYOUT_DB_PATH=data/payout.db</code></pre>
+
+    <h3 class="step"><span class="step-num">3</span> Run</h3>
+    <pre><code class="bash">source .env   # or export vars manually
+java -jar ton-payout-engine-1.0.0-fat.jar</code></pre>
+    <p>The engine starts an HTTP server on port <code>8080</code> (override with <code>SERVER_PORT</code>).</p>
+
+    <!-- Option B: Docker -->
+    <h2 style="margin-top:40px;"><span class="glyphicon glyphicon-cloud"></span> Option B &mdash; Docker</h2>
+
+    <h3 class="step"><span class="step-num">1</span> Pull from GHCR</h3>
+    <pre><code class="bash"># by version tag (recommended)
+docker pull ghcr.io/sparkyofficial-ops/ton-payout-engine:v1.0.0
+
+# by commit SHA (matches what GitHub Actions published)
+docker pull ghcr.io/sparkyofficial-ops/ton-payout-engine:f394391
+
+# latest stable
+docker pull ghcr.io/sparkyofficial-ops/ton-payout-engine:latest</code></pre>
+
+    <h3 class="step"><span class="step-num">2</span> Run with a secrets volume</h3>
+    <pre><code class="bash">docker run -d \
+  --name ton-payout \
+  -p 8080:8080 \
+  -e WALLET_ADDRESS="EQxxx..." \
+  -e WALLET_KEY_PATH="/secrets/wallet.key" \
+  -e PAYOUT_API_KEY="your-api-key" \
+  -e TON_API_KEY="your-toncenter-key" \
+  -v /srv/payout/data:/data \
+  -v /srv/payout/secrets:/secrets:ro \
+  ghcr.io/sparkyofficial-ops/ton-payout-engine:v1.0.0</code></pre>
+
+    <h3 class="step"><span class="step-num">3</span> Health check</h3>
+    <pre><code class="bash">curl http://localhost:8080/health
+# 200 OK  →  {"status":"UP"}</code></pre>
+
+    <!-- Option C: Build from source -->
+    <h2 style="margin-top:40px;"><span class="glyphicon glyphicon-wrench"></span> Option C &mdash; Build from source</h2>
+
+    <h3 class="step"><span class="step-num">1</span> Clone both repos</h3>
+    <pre><code class="bash">git clone https://github.com/SparkyOfficial-ops/cton-sdk.git      cton-sdk-main
+git clone https://github.com/SparkyOfficial-ops/ton-payout-engine.git</code></pre>
+
+    <h3 class="step"><span class="step-num">2</span> Install the SDK into local Maven repo</h3>
+    <pre><code class="bash">mvn -f cton-sdk-main/pom.xml install -DskipTests</code></pre>
+
+    <h3 class="step"><span class="step-num">3</span> Build the engine</h3>
+    <pre><code class="bash">cd ton-payout-engine
+mvn clean package</code></pre>
+    <p>The fat-JAR lands at <code>target/ton-payout-engine-1.0.0-SNAPSHOT.jar</code>.</p>
+
+    <!-- First payout -->
+    <h2 style="margin-top:40px;"><span class="glyphicon glyphicon-play-circle"></span> Your first payout</h2>
+    <pre><code class="bash">curl -s -X POST http://localhost:8080/api/v1/payout \
+  -H "X-Api-Key: your-api-key" \
+  -H "X-Idempotency-Key: test-001" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "transfers": [
+      {"to": "EQAbc...", "amount": "1.5",  "comment": "alice"},
+      {"to": "EQDef...", "amount": "0.5",  "comment": "bob"}
+    ]
+  }'</code></pre>
+    <p>Response:</p>
+    <pre><code class="json">{
+  "batchId": "7f3a2c1e-...",
+  "status": "queued"
+}</code></pre>
+    <p>Poll the status:</p>
+    <pre><code class="bash">curl -s http://localhost:8080/api/v1/status/7f3a2c1e-... \
+  -H "X-Api-Key: your-api-key"</code></pre>
+
+    <!-- Environment reference -->
+    <h2 style="margin-top:40px;"><span class="glyphicon glyphicon-cog"></span> Key environment variables</h2>
+    <div class="table-responsive">
+      <table class="table table-bordered table-striped">
+        <thead class="thead-inverse" style="background:#0f3460;color:#fff;">
+          <tr><th>Variable</th><th>Default</th><th>Description</th></tr>
+        </thead>
+        <tbody>
+          <tr><td><code>WALLET_ADDRESS</code></td><td>—</td><td>Highload Wallet v2 address (required)</td></tr>
+          <tr><td><code>WALLET_KEY_PATH</code></td><td>—</td><td>Path to 32-byte key file (required)</td></tr>
+          <tr><td><code>PAYOUT_API_KEY</code></td><td>—</td><td><code>X-Api-Key</code> header value (required)</td></tr>
+          <tr><td><code>TON_API_KEY</code></td><td>—</td><td>TON Center API key (required)</td></tr>
+          <tr><td><code>PAYOUT_DB_PATH</code></td><td><code>data/payout.db</code></td><td>SQLite database path</td></tr>
+          <tr><td><code>BATCH_WINDOW_MS</code></td><td><code>2500</code></td><td>Collection window before sending (ms)</td></tr>
+          <tr><td><code>BATCH_MAX_SIZE</code></td><td><code>254</code></td><td>Max transfers per batch</td></tr>
+          <tr><td><code>CONFIRM_DELAY_MS</code></td><td><code>12000</code></td><td>Delay before polling for confirmation (ms)</td></tr>
+          <tr><td><code>MESSAGE_TTL_MS</code></td><td><code>960000</code></td><td>External message TTL (ms)</td></tr>
+          <tr><td><code>PAUSE_RETRY_MS</code></td><td><code>60000</code></td><td>Retry interval when wallet is paused (ms)</td></tr>
+          <tr><td><code>WEBHOOK_URL</code></td><td>—</td><td>Callback URL for batch events</td></tr>
+          <tr><td><code>ALERT_URL</code></td><td>—</td><td>URL for low-balance alerts</td></tr>
+          <tr><td><code>USDT_JETTON_WALLET</code></td><td>—</td><td>Sender's USDT Jetton wallet address</td></tr>
+          <tr><td><code>SERVER_PORT</code></td><td><code>8080</code></td><td>HTTP port</td></tr>
+          <tr><td><code>HOUSEKEEPING_RETENTION_MS</code></td><td><code>2592000000</code></td><td>Archive retention (30 days)</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+  </div>
+</div>
+
+<footer class="site-footer">
+  <div class="container">
+    <p>
+      ton-payout-engine v1.0.0 &mdash;
+      <a href="https://github.com/SparkyOfficial-ops/ton-payout-engine">GitHub</a> &mdash;
+      Released under the MIT License
+    </p>
+  </div>
+</footer>
+
+<script src="https://ajax.googleapis.com/ajax/libs/jquery/1.12.4/jquery.min.js"></script>
+<script src="https://maxcdn.bootstrapcdn.com/bootstrap/3.3.7/js/bootstrap.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/9.12.0/highlight.min.js"></script>
+<script>hljs.initHighlightingOnLoad();</script>
+</body>
+</html>
