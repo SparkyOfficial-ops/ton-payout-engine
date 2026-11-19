@@ -1,0 +1,62 @@
+plugins {
+    id 'java'
+    id 'com.github.johnrengelman.shadow' version '8.1.1'
+}
+
+group = 'dev.tonpayout'
+version = project.findProperty('projectVersion') ?: '0.1.0-SNAPSHOT'
+
+java {
+    toolchain {
+        languageVersion = JavaLanguageVersion.of(17)
+    }
+}
+
+repositories {
+    mavenLocal()
+    mavenCentral()
+}
+
+dependencies {
+    // Install the sibling SDK first:
+    //   ./gradlew -p ../cton-sdk-main publishToMavenLocal -x test
+    // or via Maven:
+    //   mvn -f ../cton-sdk-main/pom.xml install -DskipTests
+    implementation 'com.cton:ton-sdk-contract:0.1.0-SNAPSHOT'
+
+    implementation 'org.xerial:sqlite-jdbc:3.49.1.0'
+    implementation 'com.fasterxml.jackson.core:jackson-databind:2.21.8'
+    implementation 'org.slf4j:slf4j-api:2.0.16'
+    implementation 'ch.qos.logback:logback-classic:1.5.16'
+    implementation 'org.slf4j:jul-to-slf4j:2.0.16'
+
+    testImplementation 'org.junit.jupiter:junit-jupiter:5.11.4'
+    testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
+}
+
+test {
+    useJUnitPlatform()
+}
+
+jar {
+    manifest {
+        attributes 'Main-Class': 'dev.tonpayout.PayoutEngine'
+    }
+}
+
+shadowJar {
+    archiveBaseName = 'ton-payout-engine'
+    archiveClassifier = ''
+    archiveVersion = project.version
+    manifest {
+        attributes 'Main-Class': 'dev.tonpayout.PayoutEngine'
+    }
+    // Drop signature files that break the fat JAR
+    exclude 'META-INF/*.SF'
+    exclude 'META-INF/*.DSA'
+    exclude 'META-INF/*.RSA'
+    mergeServiceFiles()
+}
+
+// Make 'build' produce the fat JAR (mirrors Maven's package phase)
+assemble.dependsOn shadowJar

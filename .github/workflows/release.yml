@@ -27,7 +27,7 @@ jobs:
         with:
           distribution: temurin
           java-version: "17"
-          cache: maven
+          cache: gradle
 
       - name: Install cton-sdk
         run: |
@@ -39,32 +39,20 @@ jobs:
         run: |
           RAW="${{ github.event.inputs.tag || github.ref_name }}"
           echo "version=${RAW#v}" >> "$GITHUB_OUTPUT"
-          echo "tag=${RAW}" >> "$GITHUB_OUTPUT"
-
-      - name: Set Maven version
-        run: mvn -B versions:set -DnewVersion="${{ steps.ver.outputs.version }}" -DgenerateBackupPoms=false
 
       - name: Build & test
-        run: mvn -B clean package
+        run: ./gradlew test shadowJar -PprojectVersion=${{ steps.ver.outputs.version }}
 
       - name: Rename JAR
         run: |
-          # maven-shade produces the fat JAR without the "original-" prefix
-          JAR="target/ton-payout-engine-${{ steps.ver.outputs.version }}.jar"
-          FAT="target/ton-payout-engine-${{ steps.ver.outputs.version }}-fat.jar"
-          if [ -f "$JAR" ]; then
-            mv "$JAR" "$FAT"
-          else
-            # shade plugin may keep original name — find it
-            FOUND=$(find target -maxdepth 1 -name "ton-payout-engine-*.jar" \
-                      ! -name "original-*" | head -1)
-            mv "$FOUND" "$FAT"
-          fi
+          VERSION="${{ steps.ver.outputs.version }}"
+          mv build/libs/ton-payout-engine-${VERSION}.jar \
+             build/libs/ton-payout-engine-${VERSION}-fat.jar
 
       - uses: actions/upload-artifact@v4
         with:
           name: jar
-          path: target/ton-payout-engine-${{ steps.ver.outputs.version }}-fat.jar
+          path: build/libs/ton-payout-engine-${{ steps.ver.outputs.version }}-fat.jar
 
   release:
     needs: build

@@ -22,7 +22,7 @@ WORKDIR /src/cton-sdk
 RUN mvn -q install -DskipTests
 
 WORKDIR /src/ton-payout-engine
-RUN mvn -q -DskipTests package
+RUN ./gradlew -q -x test shadowJar
 
 FROM eclipse-temurin:17-jre-jammy
 
@@ -33,7 +33,7 @@ RUN apt-get update \
 
 WORKDIR /opt/payout
 COPY --from=build /src/cton-sdk/cpp/build/libcton-sdk-core.so /opt/payout/lib/libcton-sdk-core.so
-COPY --from=build /src/ton-payout-engine/target/ton-payout-engine-0.1.0-SNAPSHOT.jar /opt/payout/app.jar
+COPY --from=build /src/ton-payout-engine/build/libs/ton-payout-engine-*.jar /opt/payout/app.jar
 
 ENV LD_LIBRARY_PATH=/opt/payout/lib
 ENV JAVA_TOOL_OPTIONS=-Djna.library.path=/opt/payout/lib

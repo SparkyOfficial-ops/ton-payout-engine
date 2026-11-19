@@ -15,11 +15,11 @@
 
 ```text
 mvn -f ../cton-sdk-main/pom.xml install -DskipTests
-mvn clean package
-java -jar target/ton-payout-engine-0.1.0-SNAPSHOT.jar
+./gradlew shadowJar
+java -jar build/libs/ton-payout-engine-0.1.0-SNAPSHOT.jar
 ```
 
-`package` кладёт зависимости в тот же JAR. Подпись при старте грузит нативную `cton-sdk-core`: на Windows это `cton-sdk-core.dll`, в Linux-образе `libcton-sdk-core.so`.
+`shadowJar` кладёт все зависимости в один JAR (`build/libs/`). Подпись при старте грузит нативную `cton-sdk-core`: на Windows это `cton-sdk-core.dll`, в Linux-образе `libcton-sdk-core.so`.
 
 Образ собирается из этого репозитория. Во время сборки он сам клонирует `cton-sdk-main`:
 
